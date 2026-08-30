@@ -8,6 +8,7 @@ import torch
 import torch.nn as nn
 from PIL import Image
 
+from .model import expects_unnormalized_input
 from .transforms import build_eval_transforms
 
 
@@ -22,7 +23,10 @@ def predict_image(
     """Classify one image and return readable FAKE/REAL probabilities."""
     model.eval()
     with Image.open(image_path) as image:
-        tensor = build_eval_transforms(image_size)(image.convert("RGB"))
+        tensor = build_eval_transforms(
+            image_size,
+            normalize=not expects_unnormalized_input(model),
+        )(image.convert("RGB"))
     probability_real = torch.sigmoid(model(tensor.unsqueeze(0).to(device))).item()
     label = "REAL" if probability_real >= probability_threshold else "FAKE"
     confidence = probability_real if label == "REAL" else 1.0 - probability_real

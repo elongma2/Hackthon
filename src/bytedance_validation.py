@@ -13,7 +13,7 @@ from torchvision.datasets import ImageFolder
 
 from .dataset import download_dataset
 from .evaluate import evaluate
-from .model import load_model
+from .model import expects_unnormalized_input, load_model
 from .transforms import build_eval_transforms
 
 
@@ -126,10 +126,16 @@ def run_bytedance_validation(
     train_dataset = ImageFolder(cifake_root / "train")
     _validate_class_mapping(train_dataset.class_to_idx, "CIFAKE training dataset")
 
+    model = load_model(checkpoint_path, device)
+    model.eval()
+
     validation_path = Path(validation_dir).resolve()
     validation_dataset = ImageFolder(
         validation_path,
-        transform=build_eval_transforms(image_size),
+        transform=build_eval_transforms(
+            image_size,
+            normalize=not expects_unnormalized_input(model),
+        ),
     )
     _validate_class_mapping(
         validation_dataset.class_to_idx,
@@ -186,8 +192,6 @@ def run_bytedance_validation(
         num_workers=num_workers,
         pin_memory=torch.cuda.is_available(),
     )
-    model = load_model(checkpoint_path, device)
-    model.eval()
     inference = evaluate(
         model,
         validation_loader,

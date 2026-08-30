@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Sequence
+from typing import Mapping, Sequence
 
 import torch
 import torch.nn as nn
@@ -184,6 +184,7 @@ def _save_staged_checkpoint(
     checkpoint_path: Path,
     selection_metric_name: str,
     best_selection_value: float,
+    checkpoint_metadata: Mapping[str, object] | None = None,
 ) -> None:
     """Save model weights together with enough metadata to understand the run."""
     payload: dict[str, object] = {
@@ -213,6 +214,14 @@ def _save_staged_checkpoint(
                 "source_recalls": metrics["source_recalls"],
             }
         )
+    if checkpoint_metadata:
+        conflicting = sorted(set(payload) & set(checkpoint_metadata))
+        if conflicting:
+            raise ValueError(
+                "Checkpoint metadata cannot replace reserved keys: "
+                + ", ".join(conflicting)
+            )
+        payload.update(checkpoint_metadata)
     torch.save(payload, checkpoint_path)
 
 
@@ -225,6 +234,11 @@ def train_staged_model(
     checkpoint_path: str | Path = "checkpoints/efficientnet_staged_best.pt",
     probability_threshold: float = 0.5,
     heldout_generator: str | None = None,
+    stage1_epochs: int = 2,
+    stage1_classifier_learning_rate: float = 1e-3,
+    stage2_classifier_learning_rate: float = 1e-4,
+    stage2_backbone_learning_rate: float = 1e-5,
+    checkpoint_metadata: Mapping[str, object] | None = None,
 ) -> dict[str, object]:
     """Train the head and final feature blocks, saving the best validation model.
 
@@ -233,8 +247,9 @@ def train_staged_model(
     """
     if stage2_epochs < 1:
         raise ValueError("stage2_epochs must be at least 1.")
+    if stage1_epochs < 1:
+        raise ValueError("stage1_epochs must be at least 1.")
 
-    stage1_epochs = 2
     total_epochs = stage1_epochs + stage2_epochs
     criterion = nn.BCEWithLogitsLoss()
     checkpoint_path = Path(checkpoint_path)
@@ -253,7 +268,7 @@ def train_staged_model(
         [
             {
                 "params": model.classifier.parameters(),
-                "lr": 1e-3,
+                "lr": stage1_classifier_learning_rate,
                 "name": "classifier",
             }
         ],
@@ -288,6 +303,7 @@ def train_staged_model(
                 checkpoint_path,
                 selection_metric_name,
                 best_selection_value,
+                checkpoint_metadata,
             )
             print(f"Saved best staged checkpoint to {checkpoint_path}")
 
@@ -302,12 +318,12 @@ def train_staged_model(
         [
             {
                 "params": model.classifier.parameters(),
-                "lr": 1e-4,
+                "lr": stage2_classifier_learning_rate,
                 "name": "classifier",
             },
             {
                 "params": backbone_parameters,
-                "lr": 1e-5,
+                "lr": stage2_backbone_learning_rate,
                 "name": "backbone",
             },
         ],
@@ -346,6 +362,7 @@ def train_staged_model(
                 checkpoint_path,
                 selection_metric_name,
                 best_selection_value,
+                checkpoint_metadata,
             )
             print(f"Saved best staged checkpoint to {checkpoint_path}")
         scheduler.step()

@@ -12,6 +12,7 @@ from torch.utils.data import DataLoader
 from torchvision.datasets import ImageFolder
 
 from .evaluate import evaluate
+from .model import expects_unnormalized_input
 from .transforms import (
     IMAGENET_MEAN,
     IMAGENET_STD,
@@ -21,43 +22,46 @@ from .transforms import (
 )
 
 
-def _test_transforms(image_size: tuple[int, int]):
+def _test_transforms(
+    image_size: tuple[int, int],
+    normalize_inputs: bool = True,
+):
     """Build the fixed clean and degraded image scenarios used for robustness tests."""
     normalize = transforms.Normalize(mean=IMAGENET_MEAN, std=IMAGENET_STD)
+
+    def finish(steps: list) -> transforms.Compose:
+        if normalize_inputs:
+            steps.append(normalize)
+        return transforms.Compose(steps)
+
     return {
-        "clean": transforms.Compose(
-            [transforms.Resize(image_size), transforms.ToTensor(), normalize]
-        ),
-        "jpeg_quality_50": transforms.Compose(
+        "clean": finish([transforms.Resize(image_size), transforms.ToTensor()]),
+        "jpeg_quality_50": finish(
             [
                 transforms.Resize(image_size),
                 RandomJPEGCompression(quality_range=(50, 50), p=1.0),
                 transforms.ToTensor(),
-                normalize,
             ]
         ),
-        "gaussian_blur_sigma_2": transforms.Compose(
+        "gaussian_blur_sigma_2": finish(
             [
                 transforms.Resize(image_size),
                 transforms.GaussianBlur(kernel_size=3, sigma=(2.0, 2.0)),
                 transforms.ToTensor(),
-                normalize,
             ]
         ),
-        "downscale_upscale_025": transforms.Compose(
+        "downscale_upscale_025": finish(
             [
                 transforms.Resize(image_size),
                 RandomDownscaleUpscale(scale_factors=(0.25,), p=1.0),
                 transforms.ToTensor(),
-                normalize,
             ]
         ),
-        "gaussian_noise_sigma_010": transforms.Compose(
+        "gaussian_noise_sigma_010": finish(
             [
                 transforms.Resize(image_size),
                 transforms.ToTensor(),
                 AddGaussianNoise(std_range=(0.10, 0.10), p=1.0),
-                normalize,
             ]
         ),
     }
@@ -76,7 +80,10 @@ def run_robustness_benchmark(
     criterion = nn.BCEWithLogitsLoss()
     results: dict[str, dict[str, float | None]] = {}
 
-    for name, transform in _test_transforms(image_size).items():
+    for name, transform in _test_transforms(
+        image_size,
+        normalize_inputs=not expects_unnormalized_input(model),
+    ).items():
         dataset = ImageFolder(test_dir, transform=transform)
         loader = DataLoader(
             dataset,

@@ -164,6 +164,50 @@ python main.py validate-bytedance `
     --checkpoint checkpoints/efficientnet_balanced_holdout_ddpm_best.pt
 ```
 
+### Hybrid spatial-frequency model
+
+The optional hybrid detector keeps EfficientNet-B0 as a 1,280-dimensional
+spatial branch and adds a lightweight FFT branch. The same robustness-augmented
+RGB tensor feeds both branches: EfficientNet applies ImageNet normalization
+internally, while the frequency branch computes a float32 luminance FFT,
+log-magnitude spectrum, and a small CNN with 256 output features. Their
+concatenated features pass through a 256-unit fusion MLP and one output logit.
+Labels and probabilities are unchanged: `FAKE=0`, `REAL=1`, and
+`sigmoid(logit)=P(REAL)`.
+
+Train the hybrid on CIFAKE plus every prepared WildFake source with the existing
+source-balanced sampler:
+
+```powershell
+python main.py train-hybrid `
+    --spatial-checkpoint checkpoints/efficientnet_balanced_all_sources_best.pt `
+    --samples-per-epoch 100000 `
+    --stage1-epochs 2 `
+    --stage2-epochs 5
+```
+
+The spatial checkpoint is loaded strictly into every EfficientNet feature
+entry; incompatible or partial checkpoints fail with a clear diagnostic. If
+`--spatial-checkpoint` is omitted, the spatial branch starts from ImageNet
+weights. Stage 1 freezes EfficientNet and trains FFT plus fusion at `1e-4`.
+Stage 2 unfreezes EfficientNet blocks 6–8 at `1e-5` while FFT plus fusion
+continue at `1e-4`. FFT preprocessing always runs in float32, including inside
+an autocast context.
+
+Arbitrary prepared FAKE sources can also be held out without changing the
+sampler or data layout:
+
+```powershell
+python main.py train-hybrid --holdout Midjourney `
+    --spatial-checkpoint checkpoints/efficientnet_balanced_all_sources_best.pt
+```
+
+The default hybrid checkpoints are
+`checkpoints/hybrid_balanced_all_sources_best.pt` and
+`checkpoints/hybrid_balanced_holdout_<source>_best.pt`. Prediction, evaluation,
+robustness, and ByteDance validation recognize hybrid checkpoint metadata and
+select the matching raw-input transform automatically.
+
 Evaluate the saved model:
 
 ```powershell
@@ -218,6 +262,8 @@ python main.py train --image-size 64 --epochs 1 --num-workers 0
 - `checkpoints/efficientnet_balanced_holdout_ddpm_best.pt` contains the best DDPM-held-out experiment.
 - `checkpoints/efficientnet_balanced_holdout_adm_best.pt` contains the best ADM-held-out experiment.
 - `checkpoints/efficientnet_balanced_all_sources_best.pt` contains the all-source-balanced model.
+- `checkpoints/hybrid_balanced_all_sources_best.pt` contains the all-source hybrid model.
+- `checkpoints/hybrid_balanced_holdout_<source>_best.pt` contains a hybrid held-out experiment.
 - `results/robustness.json` contains robustness metrics.
 
 Run `python main.py --help` to see all options.

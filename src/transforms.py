@@ -78,31 +78,34 @@ class AddGaussianNoise:
         return torch.clamp(tensor + torch.randn_like(tensor) * std, 0.0, 1.0)
 
 
-def build_train_transforms(image_size: tuple[int, int] = (224, 224)):
-    """Build the one shared augmentation pipeline used for every training source."""
-    return transforms.Compose(
-        [
-            transforms.RandomResizedCrop(image_size, scale=(0.8, 1.0)),
-            transforms.RandomHorizontalFlip(p=0.5),
-            RandomDownscaleUpscale(scale_factors=(0.25, 0.5), p=0.3),
-            RandomJPEGCompression(quality_range=(30, 90), p=0.4),
-            transforms.RandomApply(
-                [transforms.GaussianBlur(kernel_size=3, sigma=(0.5, 2.0))], p=0.3
-            ),
-            transforms.ColorJitter(brightness=0.2, contrast=0.2, saturation=0.2),
-            transforms.ToTensor(),
-            AddGaussianNoise(std_range=(0.02, 0.10), p=0.3),
-            transforms.Normalize(mean=IMAGENET_MEAN, std=IMAGENET_STD),
-        ]
-    )
+def build_train_transforms(
+    image_size: tuple[int, int] = (224, 224),
+    normalize: bool = True,
+):
+    """Build shared augmentations, optionally leaving tensors in the RGB image range."""
+    steps = [
+        transforms.RandomResizedCrop(image_size, scale=(0.8, 1.0)),
+        transforms.RandomHorizontalFlip(p=0.5),
+        RandomDownscaleUpscale(scale_factors=(0.25, 0.5), p=0.3),
+        RandomJPEGCompression(quality_range=(30, 90), p=0.4),
+        transforms.RandomApply(
+            [transforms.GaussianBlur(kernel_size=3, sigma=(0.5, 2.0))], p=0.3
+        ),
+        transforms.ColorJitter(brightness=0.2, contrast=0.2, saturation=0.2),
+        transforms.ToTensor(),
+        AddGaussianNoise(std_range=(0.02, 0.10), p=0.3),
+    ]
+    if normalize:
+        steps.append(transforms.Normalize(mean=IMAGENET_MEAN, std=IMAGENET_STD))
+    return transforms.Compose(steps)
 
 
-def build_eval_transforms(image_size: tuple[int, int] = (224, 224)):
-    """Build deterministic resize and normalization steps for validation images."""
-    return transforms.Compose(
-        [
-            transforms.Resize(image_size),
-            transforms.ToTensor(),
-            transforms.Normalize(mean=IMAGENET_MEAN, std=IMAGENET_STD),
-        ]
-    )
+def build_eval_transforms(
+    image_size: tuple[int, int] = (224, 224),
+    normalize: bool = True,
+):
+    """Build deterministic evaluation steps with optional ImageNet normalization."""
+    steps = [transforms.Resize(image_size), transforms.ToTensor()]
+    if normalize:
+        steps.append(transforms.Normalize(mean=IMAGENET_MEAN, std=IMAGENET_STD))
+    return transforms.Compose(steps)

@@ -36,12 +36,37 @@ def _find_existing_split_root(dataset_path: Path) -> Path | None:
         return None
 
 
+def _find_existing_cifake_root(destination: Path) -> Path | None:
+    """Find CIFAKE without mistaking arbitrary WildFake TRAIN/TEST pairs for it."""
+    if (destination / "train").is_dir() and (destination / "test").is_dir():
+        return destination
+    if destination.name.casefold() == DATASET_DIRECTORY_NAME:
+        return _find_existing_split_root(destination)
+    direct_children = sorted(
+        (path for path in destination.iterdir() if path.is_dir()),
+        key=lambda path: str(path).casefold(),
+    )
+    named_candidates = [
+        path for path in direct_children if path.name.casefold() == DATASET_DIRECTORY_NAME
+    ]
+    named_candidates.extend(
+        child / DATASET_DIRECTORY_NAME
+        for child in direct_children
+        if (child / DATASET_DIRECTORY_NAME).is_dir()
+    )
+    for candidate in named_candidates:
+        existing = _find_existing_split_root(candidate)
+        if existing is not None:
+            return existing
+    return None
+
+
 def download_dataset(data_dir: str | Path = "data/raw") -> Path:
     """Reuse local CIFAKE files or download them into a safe empty directory."""
     destination = Path(data_dir).resolve()
     destination.mkdir(parents=True, exist_ok=True)
 
-    existing_dataset = _find_existing_split_root(destination)
+    existing_dataset = _find_existing_cifake_root(destination)
     if existing_dataset is not None:
         print(f"Using existing dataset at {existing_dataset}")
         return existing_dataset
@@ -73,11 +98,18 @@ def get_data_loaders(
     batch_size: int = 32,
     image_size: tuple[int, int] = (224, 224),
     num_workers: int = 2,
+    normalize_inputs: bool = True,
 ) -> tuple[DataLoader, DataLoader]:
     """Build the original shuffled CIFAKE train and ordered test loaders."""
     root = _find_split_root(Path(dataset_path))
-    train_dataset = ImageFolder(root / "train", transform=build_train_transforms(image_size))
-    test_dataset = ImageFolder(root / "test", transform=build_eval_transforms(image_size))
+    train_dataset = ImageFolder(
+        root / "train",
+        transform=build_train_transforms(image_size, normalize=normalize_inputs),
+    )
+    test_dataset = ImageFolder(
+        root / "test",
+        transform=build_eval_transforms(image_size, normalize=normalize_inputs),
+    )
     pin_memory = torch.cuda.is_available()
 
     train_loader = DataLoader(

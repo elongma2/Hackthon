@@ -11,7 +11,15 @@ from src.bytedance_validation import run_bytedance_validation
 from src.data_preparation import DEFAULT_TRAIN_RATIO, prepare_wildfake_data
 from src.dataset import download_dataset, get_data_loaders, get_test_directory
 from src.evaluate import evaluate
-from src.model import build_model, get_device, load_model
+from src.hybrid_model import (
+    FREQUENCY_FEATURE_DIM,
+    FUSION_DROPOUT,
+    FUSION_HIDDEN_DIM,
+    HYBRID_MODEL_TYPE,
+    SPATIAL_FEATURE_DIM,
+    build_hybrid_model,
+)
+from src.model import build_model, expects_unnormalized_input, get_device, load_model
 from src.multisource_dataset import (
     get_multisource_data_loaders,
     resolve_wildfake_holdout,
@@ -34,6 +42,9 @@ DEFAULT_MULTISOURCE_CHECKPOINT = Path(
 DEFAULT_ALL_SOURCE_BALANCED_CHECKPOINT = Path(
     "checkpoints/efficientnet_balanced_all_sources_best.pt"
 )
+DEFAULT_ALL_SOURCE_HYBRID_CHECKPOINT = Path(
+    "checkpoints/hybrid_balanced_all_sources_best.pt"
+)
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -46,6 +57,7 @@ def build_parser() -> argparse.ArgumentParser:
             "train-staged",
             "train-multisource",
             "train-source-balanced",
+            "train-hybrid",
             "evaluate",
             "robustness",
             "predict",
@@ -61,9 +73,9 @@ def build_parser() -> argparse.ArgumentParser:
         default=None,
         help=(
             "Checkpoint path. Uses the multisource checkpoint for train-multisource, "
-            "a holdout-specific checkpoint for train-source-balanced, the staged "
-            "checkpoint for train-staged and validate-bytedance, and the baseline "
-            "checkpoint otherwise."
+            "an all-source or holdout-specific checkpoint for source-balanced and "
+            "hybrid training, the staged checkpoint for train-staged and "
+            "validate-bytedance, and the baseline checkpoint otherwise."
         ),
     )
     parser.add_argument(
@@ -71,8 +83,17 @@ def build_parser() -> argparse.ArgumentParser:
         type=str,
         default=None,
         help=(
-            "Optional WildFake FAKE source excluded from train-source-balanced. "
-            "Omit it to train on every prepared source."
+            "Optional WildFake FAKE source excluded from train-source-balanced or "
+            "train-hybrid. Omit it to train on every prepared source."
+        ),
+    )
+    parser.add_argument(
+        "--spatial-checkpoint",
+        type=Path,
+        default=None,
+        help=(
+            "Optional EfficientNet checkpoint used to initialize train-hybrid. "
+            "When omitted, the spatial branch uses ImageNet weights."
         ),
     )
     parser.add_argument(
@@ -103,10 +124,19 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--image", type=Path, help="Image to classify with the predict command.")
     parser.add_argument("--epochs", type=int, default=5, help="Epochs for baseline training.")
     parser.add_argument(
+        "--stage1-epochs",
+        type=int,
+        default=2,
+        help="Frozen-spatial warm-up epochs for train-hybrid (default: 2).",
+    )
+    parser.add_argument(
         "--stage2-epochs",
         type=int,
         default=5,
-        help="Partial-unfreezing epochs after two fixed head-only epochs.",
+        help=(
+            "Partial-unfreezing epochs (default: 5). EfficientNet-only staged "
+            "training still uses its fixed two head-only epochs."
+        ),
     )
     parser.add_argument("--batch-size", type=int, default=32)
     parser.add_argument("--learning-rate", type=float, default=1e-4)
@@ -149,6 +179,17 @@ def resolve_checkpoint_path(
                 "pass --checkpoint explicitly."
             )
         return Path(f"checkpoints/efficientnet_balanced_holdout_{slug}_best.pt")
+    if command == "train-hybrid":
+        if holdout is None:
+            return DEFAULT_ALL_SOURCE_HYBRID_CHECKPOINT
+        normalized = holdout.strip()
+        slug = re.sub(r"[^a-z0-9]+", "_", normalized.casefold()).strip("_")
+        if not slug:
+            raise ValueError(
+                f"Cannot create a safe checkpoint name from holdout {holdout!r}; "
+                "pass --checkpoint explicitly."
+            )
+        return Path(f"checkpoints/hybrid_balanced_holdout_{slug}_best.pt")
     if command == "train-multisource":
         return DEFAULT_MULTISOURCE_CHECKPOINT
     if command in ("train-staged", "validate-bytedance"):
@@ -162,6 +203,8 @@ def main() -> None:
     args = parser.parse_args()
     if args.samples_per_epoch < 1:
         parser.error("--samples-per-epoch must be at least 1")
+    if args.stage1_epochs < 1:
+        parser.error("--stage1-epochs must be at least 1")
     if args.command == "prepare-data" and not 0.0 < args.train_ratio < 1.0:
         parser.error("--train-ratio must be greater than 0 and less than 1")
 
@@ -182,7 +225,7 @@ def main() -> None:
         return
 
     canonical_holdout = args.holdout
-    if args.command == "train-source-balanced" and args.holdout is not None:
+    if args.command in ("train-source-balanced", "train-hybrid") and args.holdout is not None:
         try:
             canonical_holdout = resolve_wildfake_holdout(
                 wildfake_path,
@@ -277,7 +320,90 @@ def main() -> None:
         )
         return
 
+    if args.command == "train-hybrid":
+        dataset_path = download_dataset(args.data_dir)
+        train_loader, validation_loader = get_source_balanced_data_loaders(
+            dataset_path,
+            wildfake_path,
+            holdout=canonical_holdout,
+            batch_size=args.batch_size,
+            samples_per_epoch=args.samples_per_epoch,
+            seed=args.seed,
+            image_size=image_size,
+            num_workers=args.num_workers,
+            normalize_inputs=False,
+        )
+        model = build_hybrid_model(
+            device,
+            spatial_checkpoint=args.spatial_checkpoint,
+        )
+        spatial_initialization = (
+            "imagenet"
+            if args.spatial_checkpoint is None
+            else str(args.spatial_checkpoint.resolve())
+        )
+        checkpoint_metadata = {
+            "model_type": HYBRID_MODEL_TYPE,
+            "spatial_feature_dim": SPATIAL_FEATURE_DIM,
+            "frequency_feature_dim": FREQUENCY_FEATURE_DIM,
+            "fusion_hidden_dim": FUSION_HIDDEN_DIM,
+            "fusion_dropout": FUSION_DROPOUT,
+            "fft_preprocessing": "float32 luminance fft2 ortho fftshift log1p per-image-standardization",
+            "spatial_initialization": spatial_initialization,
+            "heldout_generator_config": canonical_holdout,
+            "training_sources": [source.name for source in train_loader.dataset.sources],
+            "validation_sources": [source.name for source in validation_loader.dataset.sources],
+            "training_config": {
+                "stage1_epochs": args.stage1_epochs,
+                "stage2_epochs": args.stage2_epochs,
+                "stage1_classifier_learning_rate": 1e-4,
+                "stage2_classifier_learning_rate": 1e-4,
+                "stage2_backbone_learning_rate": 1e-5,
+                "samples_per_epoch": args.samples_per_epoch,
+                "seed": args.seed,
+            },
+        }
+        train_staged_model(
+            model,
+            train_loader,
+            validation_loader,
+            device,
+            stage2_epochs=args.stage2_epochs,
+            checkpoint_path=checkpoint_path,
+            heldout_generator=canonical_holdout,
+            stage1_epochs=args.stage1_epochs,
+            stage1_classifier_learning_rate=1e-4,
+            stage2_classifier_learning_rate=1e-4,
+            stage2_backbone_learning_rate=1e-5,
+            checkpoint_metadata=checkpoint_metadata,
+        )
+        return
+
     dataset_path = download_dataset(args.data_dir)
+    if args.command == "evaluate":
+        model = load_model(checkpoint_path, device)
+        _, test_loader = get_data_loaders(
+            dataset_path,
+            batch_size=args.batch_size,
+            image_size=image_size,
+            num_workers=args.num_workers,
+            normalize_inputs=not expects_unnormalized_input(model),
+        )
+        metrics = evaluate(model, test_loader, nn.BCEWithLogitsLoss(), device)
+        auc_text = "N/A" if metrics["auc_roc"] is None else f"{metrics['auc_roc']:.4f}"
+        print(f"Loss: {metrics['loss']:.4f} | accuracy: {metrics['accuracy']:.2%} | AUC-ROC: {auc_text}")
+        return
+    if args.command == "robustness":
+        model = load_model(checkpoint_path, device)
+        run_robustness_benchmark(
+            model,
+            get_test_directory(dataset_path),
+            device,
+            batch_size=args.batch_size,
+            image_size=image_size,
+            num_workers=args.num_workers,
+        )
+        return
     train_loader, test_loader = get_data_loaders(
         dataset_path,
         batch_size=args.batch_size,
@@ -306,21 +432,6 @@ def main() -> None:
                 stage2_epochs=args.stage2_epochs,
                 checkpoint_path=checkpoint_path,
             )
-        model = load_model(checkpoint_path, device)
-        run_robustness_benchmark(
-            model,
-            get_test_directory(dataset_path),
-            device,
-            batch_size=args.batch_size,
-            image_size=image_size,
-            num_workers=args.num_workers,
-        )
-    elif args.command == "evaluate":
-        model = load_model(checkpoint_path, device)
-        metrics = evaluate(model, test_loader, nn.BCEWithLogitsLoss(), device)
-        auc_text = "N/A" if metrics["auc_roc"] is None else f"{metrics['auc_roc']:.4f}"
-        print(f"Loss: {metrics['loss']:.4f} | accuracy: {metrics['accuracy']:.2%} | AUC-ROC: {auc_text}")
-    else:
         model = load_model(checkpoint_path, device)
         run_robustness_benchmark(
             model,

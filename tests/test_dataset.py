@@ -15,6 +15,31 @@ def create_splits(root: Path) -> Path:
 
 
 class DatasetDownloadTests(unittest.TestCase):
+    def test_reuses_nested_split_when_data_dir_is_named_cifake(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            data_dir = Path(directory) / "cifake"
+            split_root = create_splits(data_dir / "download" / "cifake")
+
+            with patch("src.dataset.kagglehub.dataset_download") as download_mock:
+                result = download_dataset(data_dir)
+
+            self.assertEqual(result, split_root)
+            download_mock.assert_not_called()
+
+    def test_wildfake_train_test_is_never_reused_as_cifake(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            raw = Path(directory) / "raw"
+            (raw / "WildFake" / "FAKE" / "ADM" / "TRAIN").mkdir(parents=True)
+            (raw / "WildFake" / "FAKE" / "ADM" / "TEST").mkdir(parents=True)
+            downloaded = raw / "cifake" / "download" / "cifake"
+            create_splits(downloaded)
+
+            with patch("src.dataset.kagglehub.dataset_download", return_value=str(downloaded)):
+                resolved = download_dataset(raw)
+
+            self.assertEqual(resolved, downloaded)
+            self.assertNotIn("WildFake", str(resolved))
+
     def test_reuses_existing_dataset_without_downloading(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             data_dir = Path(directory) / "raw"

@@ -185,6 +185,7 @@ def get_source_balanced_data_loaders(
     seed: int = DEFAULT_BALANCED_SEED,
     image_size: tuple[int, int] = (224, 224),
     num_workers: int = 2,
+    normalize_inputs: bool = True,
 ) -> tuple[DataLoader, DataLoader]:
     """Build balanced training with optional held-out-generator validation."""
     normalized: str | None = None
@@ -205,11 +206,11 @@ def get_source_balanced_data_loaders(
         )
     training_dataset = MultiSourceImageDataset(
         training_sources,
-        transform=build_train_transforms(image_size),
+        transform=build_train_transforms(image_size, normalize=normalize_inputs),
     )
     validation_dataset = MultiSourceImageDataset(
         validation_sources,
-        transform=build_eval_transforms(image_size),
+        transform=build_eval_transforms(image_size, normalize=normalize_inputs),
         return_source=normalized is not None,
     )
     batch_sampler = SourceBalancedBatchSampler(
