@@ -1,0 +1,27 @@
+{
+  "clean": {
+    "loss": 0.1161189282566309,
+    "accuracy": 0.9543,
+    "auc_roc": 0.9949940899999999
+  },
+  "jpeg_quality_50": {
+    "loss": 0.10238102275133133,
+    "accuracy": 0.96135,
+    "auc_roc": 0.99436419
+  },
+  "gaussian_blur_sigma_2": {
+    "loss": 0.10924309540092945,
+    "accuracy": 0.95755,
+    "auc_roc": 0.99484748
+  },
+  "downscale_upscale_025": {
+    "loss": 0.09994855893552303,
+    "accuracy": 0.9619,
+    "auc_roc": 0.9939115599999999
+  },
+  "gaussian_noise_sigma_010": {
+    "loss": 0.15181085807085037,
+    "accuracy": 0.94095,
+    "auc_roc": 0.987179785
+  }
+}
