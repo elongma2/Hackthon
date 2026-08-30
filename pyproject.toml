@@ -7,7 +7,10 @@ authors = [
     { name = "elongma2", email = "joshuablazer72@gmail.com" }
 ]
 requires-python = ">=3.12"
-dependencies = []
+dependencies = [
+    "numpy>=2.5.2",
+    "pillow>=12.3.0",
+]
 
 [project.scripts]
 hackathon = "hackathon:main"
