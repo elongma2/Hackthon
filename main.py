@@ -1,7 +1,6 @@
 """Command-line entry point for training and evaluating the CIFAKE detector."""
 
 from __future__ import annotations
-
 import argparse
 import re
 from pathlib import Path
