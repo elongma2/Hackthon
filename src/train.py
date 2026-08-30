@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from pathlib import Path
 from typing import Mapping, Sequence
 
@@ -12,6 +13,10 @@ from tqdm.auto import tqdm
 
 from .evaluate import evaluate
 from .source_balanced import calculate_source_metrics, print_source_metrics
+
+
+StageSetup = tuple[tuple[nn.Module, ...], list[dict[str, object]]]
+StageConfigurator = Callable[[nn.Module, str], StageSetup]
 
 
 def train_one_epoch(
@@ -239,11 +244,14 @@ def train_staged_model(
     stage2_classifier_learning_rate: float = 1e-4,
     stage2_backbone_learning_rate: float = 1e-5,
     checkpoint_metadata: Mapping[str, object] | None = None,
+    stage_configurator: StageConfigurator | None = None,
 ) -> dict[str, object]:
     """Train the head and final feature blocks, saving the best validation model.
 
     Ordinary staged runs select pooled validation AUC. Source-balanced runs pass
     a held-out generator and instead select that generator's FAKE-positive AUC.
+    An optional configurator may provide model-specific frozen modules and
+    optimizer groups while the epoch, evaluation, and checkpoint loop stays shared.
     """
     if stage2_epochs < 1:
         raise ValueError("stage2_epochs must be at least 1.")
@@ -263,17 +271,18 @@ def train_staged_model(
     history: list[dict[str, object]] = []
     global_epoch = 0
 
-    frozen_blocks = configure_head_only(model)
-    stage1_optimizer = torch.optim.AdamW(
-        [
+    if stage_configurator is None:
+        frozen_blocks = configure_head_only(model)
+        stage1_groups: list[dict[str, object]] = [
             {
                 "params": model.classifier.parameters(),
                 "lr": stage1_classifier_learning_rate,
                 "name": "classifier",
             }
-        ],
-        weight_decay=1e-2,
-    )
+        ]
+    else:
+        frozen_blocks, stage1_groups = stage_configurator(model, "stage1")
+    stage1_optimizer = torch.optim.AdamW(stage1_groups, weight_decay=1e-2)
 
     for stage_epoch in range(1, stage1_epochs + 1):
         global_epoch += 1
@@ -307,15 +316,15 @@ def train_staged_model(
             )
             print(f"Saved best staged checkpoint to {checkpoint_path}")
 
-    frozen_blocks, trainable_blocks = configure_partial_unfreezing(model, 3)
-    backbone_parameters = [
-        parameter
-        for block in trainable_blocks
-        for parameter in block.parameters()
-        if parameter.requires_grad
-    ]
-    stage2_optimizer = torch.optim.AdamW(
-        [
+    if stage_configurator is None:
+        frozen_blocks, trainable_blocks = configure_partial_unfreezing(model, 3)
+        backbone_parameters = [
+            parameter
+            for block in trainable_blocks
+            for parameter in block.parameters()
+            if parameter.requires_grad
+        ]
+        stage2_groups: list[dict[str, object]] = [
             {
                 "params": model.classifier.parameters(),
                 "lr": stage2_classifier_learning_rate,
@@ -326,9 +335,10 @@ def train_staged_model(
                 "lr": stage2_backbone_learning_rate,
                 "name": "backbone",
             },
-        ],
-        weight_decay=1e-2,
-    )
+        ]
+    else:
+        frozen_blocks, stage2_groups = stage_configurator(model, "stage2")
+    stage2_optimizer = torch.optim.AdamW(stage2_groups, weight_decay=1e-2)
     scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
         stage2_optimizer,
         T_max=stage2_epochs,

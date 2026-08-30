@@ -2,9 +2,11 @@
 
 from __future__ import annotations
 import argparse
+import math
 import re
 from pathlib import Path
 
+import torch
 import torch.nn as nn
 
 from src.bytedance_validation import run_bytedance_validation
@@ -18,6 +20,20 @@ from src.hybrid_model import (
     HYBRID_MODEL_TYPE,
     SPATIAL_FEATURE_DIM,
     build_hybrid_model,
+)
+from src.hybrid_v2_model import (
+    DEFAULT_FREQUENCY_BRANCH_DROPOUT,
+    DEFAULT_FREQUENCY_MASK_PROB,
+    DEFAULT_FREQUENCY_SCALE,
+    HYBRID_V2_MODEL_TYPE,
+    V2_FREQUENCY_DROPOUT,
+    V2_FREQUENCY_FEATURE_DIM,
+    V2_FREQUENCY_HIDDEN_DIM,
+    V2_FREQUENCY_LEARNING_RATE,
+    V2_SPATIAL_FEATURE_DIM,
+    V2_SPATIAL_LEARNING_RATE,
+    build_hybrid_v2_model,
+    configure_hybrid_v2_stage,
 )
 from src.model import build_model, expects_unnormalized_input, get_device, load_model
 from src.multisource_dataset import (
@@ -45,6 +61,9 @@ DEFAULT_ALL_SOURCE_BALANCED_CHECKPOINT = Path(
 DEFAULT_ALL_SOURCE_HYBRID_CHECKPOINT = Path(
     "checkpoints/hybrid_balanced_all_sources_best.pt"
 )
+DEFAULT_ALL_SOURCE_HYBRID_V2_CHECKPOINT = Path(
+    "checkpoints/hybrid_v2_balanced_all_sources_best.pt"
+)
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -58,6 +77,7 @@ def build_parser() -> argparse.ArgumentParser:
             "train-multisource",
             "train-source-balanced",
             "train-hybrid",
+            "train-hybrid-v2",
             "evaluate",
             "robustness",
             "predict",
@@ -84,7 +104,7 @@ def build_parser() -> argparse.ArgumentParser:
         default=None,
         help=(
             "Optional WildFake FAKE source excluded from train-source-balanced or "
-            "train-hybrid. Omit it to train on every prepared source."
+            "either hybrid command. Omit it to train on every prepared source."
         ),
     )
     parser.add_argument(
@@ -93,8 +113,33 @@ def build_parser() -> argparse.ArgumentParser:
         default=None,
         help=(
             "Optional EfficientNet checkpoint used to initialize train-hybrid. "
-            "When omitted, the spatial branch uses ImageNet weights."
+            "It also initializes train-hybrid-v2. When omitted, the spatial branch "
+            "uses ImageNet weights."
         ),
+    )
+    parser.add_argument(
+        "--frequency-scale",
+        type=float,
+        default=DEFAULT_FREQUENCY_SCALE,
+        help="Fixed Hybrid V2 FFT residual scale (default: 0.25).",
+    )
+    parser.add_argument(
+        "--frequency-branch-dropout",
+        type=float,
+        default=DEFAULT_FREQUENCY_BRANCH_DROPOUT,
+        help="Hybrid V2 training-only FFT branch dropout (default: 0.20).",
+    )
+    parser.add_argument(
+        "--frequency-mask-prob",
+        type=float,
+        default=DEFAULT_FREQUENCY_MASK_PROB,
+        help="Hybrid V2 training-only FFT spectrum masking chance (default: 0.0).",
+    )
+    parser.add_argument(
+        "--run-name",
+        type=str,
+        default=None,
+        help="Optional Hybrid V2 experiment name used in its automatic checkpoint path.",
     )
     parser.add_argument(
         "--samples-per-epoch",
@@ -127,7 +172,7 @@ def build_parser() -> argparse.ArgumentParser:
         "--stage1-epochs",
         type=int,
         default=2,
-        help="Frozen-spatial warm-up epochs for train-hybrid (default: 2).",
+        help="Frozen-spatial warm-up epochs for hybrid training (default: 2).",
     )
     parser.add_argument(
         "--stage2-epochs",
@@ -164,6 +209,7 @@ def resolve_checkpoint_path(
     command: str,
     checkpoint: Path | None,
     holdout: str | None = None,
+    run_name: str | None = None,
 ) -> Path:
     """Choose a command-specific checkpoint unless the user supplied one."""
     if checkpoint is not None:
@@ -190,6 +236,37 @@ def resolve_checkpoint_path(
                 "pass --checkpoint explicitly."
             )
         return Path(f"checkpoints/hybrid_balanced_holdout_{slug}_best.pt")
+    if command == "train-hybrid-v2":
+        holdout_slug: str | None = None
+        if holdout is not None:
+            holdout_slug = re.sub(
+                r"[^a-z0-9]+",
+                "_",
+                holdout.strip().casefold(),
+            ).strip("_")
+            if not holdout_slug:
+                raise ValueError(
+                    f"Cannot create a safe checkpoint name from holdout {holdout!r}; "
+                    "pass --checkpoint explicitly."
+                )
+        if run_name is not None:
+            run_slug = re.sub(
+                r"[^a-z0-9]+",
+                "_",
+                run_name.strip().casefold(),
+            ).strip("_")
+            if not run_slug:
+                raise ValueError(
+                    f"Cannot create a safe checkpoint name from run name {run_name!r}."
+                )
+            if holdout_slug is None:
+                return Path(f"checkpoints/hybrid_v2_{run_slug}_all_sources_best.pt")
+            return Path(
+                f"checkpoints/hybrid_v2_{run_slug}_holdout_{holdout_slug}_best.pt"
+            )
+        if holdout_slug is None:
+            return DEFAULT_ALL_SOURCE_HYBRID_V2_CHECKPOINT
+        return Path(f"checkpoints/hybrid_v2_balanced_holdout_{holdout_slug}_best.pt")
     if command == "train-multisource":
         return DEFAULT_MULTISOURCE_CHECKPOINT
     if command in ("train-staged", "validate-bytedance"):
@@ -205,6 +282,19 @@ def main() -> None:
         parser.error("--samples-per-epoch must be at least 1")
     if args.stage1_epochs < 1:
         parser.error("--stage1-epochs must be at least 1")
+    if args.command == "train-hybrid-v2":
+        if not math.isfinite(args.frequency_scale) or args.frequency_scale < 0.0:
+            parser.error("--frequency-scale must be greater than or equal to 0")
+        if not 0.0 <= args.frequency_branch_dropout <= 1.0:
+            parser.error("--frequency-branch-dropout must be between 0 and 1")
+        if not 0.0 <= args.frequency_mask_prob <= 1.0:
+            parser.error("--frequency-mask-prob must be between 0 and 1")
+        if args.run_name is not None and not re.sub(
+            r"[^a-z0-9]+",
+            "_",
+            args.run_name.strip().casefold(),
+        ).strip("_"):
+            parser.error("--run-name must contain at least one letter or number")
     if args.command == "prepare-data" and not 0.0 < args.train_ratio < 1.0:
         parser.error("--train-ratio must be greater than 0 and less than 1")
 
@@ -225,7 +315,11 @@ def main() -> None:
         return
 
     canonical_holdout = args.holdout
-    if args.command in ("train-source-balanced", "train-hybrid") and args.holdout is not None:
+    if args.command in (
+        "train-source-balanced",
+        "train-hybrid",
+        "train-hybrid-v2",
+    ) and args.holdout is not None:
         try:
             canonical_holdout = resolve_wildfake_holdout(
                 wildfake_path,
@@ -233,11 +327,24 @@ def main() -> None:
             )
         except (OSError, ValueError) as error:
             parser.error(str(error))
-    checkpoint_path = resolve_checkpoint_path(
-        args.command,
-        args.checkpoint,
-        canonical_holdout,
-    )
+    try:
+        checkpoint_path = resolve_checkpoint_path(
+            args.command,
+            args.checkpoint,
+            canonical_holdout,
+            args.run_name,
+        )
+    except ValueError as error:
+        parser.error(str(error))
+    if (
+        args.command == "train-hybrid-v2"
+        and args.checkpoint is None
+        and checkpoint_path.exists()
+    ):
+        parser.error(
+            f"Refusing to overwrite existing Hybrid V2 checkpoint: {checkpoint_path}. "
+            "Choose a new --run-name or pass an explicit --checkpoint path."
+        )
     device = get_device()
     image_size = (args.image_size, args.image_size)
     print(f"Using device: {device}")
@@ -376,6 +483,100 @@ def main() -> None:
             stage2_classifier_learning_rate=1e-4,
             stage2_backbone_learning_rate=1e-5,
             checkpoint_metadata=checkpoint_metadata,
+        )
+        return
+
+    if args.command == "train-hybrid-v2":
+        torch.manual_seed(args.seed)
+        if torch.cuda.is_available():
+            torch.cuda.manual_seed_all(args.seed)
+        dataset_path = download_dataset(args.data_dir)
+        train_loader, validation_loader = get_source_balanced_data_loaders(
+            dataset_path,
+            wildfake_path,
+            holdout=canonical_holdout,
+            batch_size=args.batch_size,
+            samples_per_epoch=args.samples_per_epoch,
+            seed=args.seed,
+            image_size=image_size,
+            num_workers=args.num_workers,
+            normalize_inputs=False,
+        )
+        model = build_hybrid_v2_model(
+            device,
+            spatial_checkpoint=args.spatial_checkpoint,
+            frequency_scale=args.frequency_scale,
+            frequency_branch_dropout=args.frequency_branch_dropout,
+            frequency_mask_probability=args.frequency_mask_prob,
+        )
+        if model.spatial_classifier_loaded:
+            print(
+                "Hybrid V2 Stage 1: EfficientNet features and the loaded spatial "
+                "classifier are frozen; FFT CNN/head train at 5e-5."
+            )
+        else:
+            print(
+                "Hybrid V2 Stage 1: EfficientNet features are frozen; the random "
+                "spatial classifier trains at 1e-5 and FFT CNN/head train at 5e-5."
+            )
+        print(
+            "Hybrid V2 Stage 2: EfficientNet blocks 0-5 stay frozen; blocks 6-8 "
+            "and the spatial classifier train at 1e-5; FFT CNN/head train at 5e-5."
+        )
+        spatial_initialization = (
+            "imagenet"
+            if args.spatial_checkpoint is None
+            else str(args.spatial_checkpoint.resolve())
+        )
+        checkpoint_metadata = {
+            "model_type": HYBRID_V2_MODEL_TYPE,
+            "spatial_feature_dim": V2_SPATIAL_FEATURE_DIM,
+            "frequency_feature_dim": V2_FREQUENCY_FEATURE_DIM,
+            "frequency_hidden_dim": V2_FREQUENCY_HIDDEN_DIM,
+            "frequency_dropout": V2_FREQUENCY_DROPOUT,
+            "frequency_scale": args.frequency_scale,
+            "frequency_branch_dropout": args.frequency_branch_dropout,
+            "frequency_mask_prob": args.frequency_mask_prob,
+            "fft_preprocessing": (
+                "float32 luminance fft2 ortho fftshift log1p "
+                "per-image-standardization"
+            ),
+            "spatial_initialization": spatial_initialization,
+            "spatial_classifier_loaded": model.spatial_classifier_loaded,
+            "spatial_classifier_source": model.spatial_classifier_source,
+            "heldout_generator_config": canonical_holdout,
+            "run_name": None if args.run_name is None else args.run_name.strip(),
+            "seed": args.seed,
+            "training_sources": [source.name for source in train_loader.dataset.sources],
+            "validation_sources": [
+                source.name for source in validation_loader.dataset.sources
+            ],
+            "training_config": {
+                "stage1_epochs": args.stage1_epochs,
+                "stage2_epochs": args.stage2_epochs,
+                "stage1_frequency_learning_rate": V2_FREQUENCY_LEARNING_RATE,
+                "stage1_spatial_classifier_learning_rate": (
+                    None
+                    if model.spatial_classifier_loaded
+                    else V2_SPATIAL_LEARNING_RATE
+                ),
+                "stage2_frequency_learning_rate": V2_FREQUENCY_LEARNING_RATE,
+                "stage2_spatial_learning_rate": V2_SPATIAL_LEARNING_RATE,
+                "samples_per_epoch": args.samples_per_epoch,
+                "seed": args.seed,
+            },
+        }
+        train_staged_model(
+            model,
+            train_loader,
+            validation_loader,
+            device,
+            stage2_epochs=args.stage2_epochs,
+            checkpoint_path=checkpoint_path,
+            heldout_generator=canonical_holdout,
+            stage1_epochs=args.stage1_epochs,
+            checkpoint_metadata=checkpoint_metadata,
+            stage_configurator=configure_hybrid_v2_stage,
         )
         return
 

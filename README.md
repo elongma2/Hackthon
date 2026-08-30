@@ -208,6 +208,43 @@ The default hybrid checkpoints are
 robustness, and ByteDance validation recognize hybrid checkpoint metadata and
 select the matching raw-input transform automatically.
 
+### Hybrid V2: controlled FFT residual
+
+Hybrid V1 concatenates 1,280 EfficientNet features with 256 FFT features and
+learns a fusion MLP. Hybrid V2 instead keeps the spatial detector as the main
+decision path and adds a smaller 128-feature FFT prediction as a controlled
+correction:
+
+```text
+final_logit = spatial_logit + frequency_scale * frequency_logit
+```
+
+The default `frequency_scale` is `0.25`. Training-only frequency branch dropout
+defaults to `0.20`, so some samples must be classified from the spatial path
+alone. Optional spectrum masking is available but disabled by default. These
+constraints are intended to reduce dependence on generator-specific frequency
+cues; improved ByteDance performance must be confirmed experimentally.
+
+Run a short source-balanced V2 experiment from the trained EfficientNet:
+
+```powershell
+python main.py train-hybrid-v2 --data-dir data/raw/cifake --wildfake-dir data/raw/WildFake --spatial-checkpoint checkpoints/efficientnet_balanced_all_sources_best.pt --samples-per-epoch 5000 --stage1-epochs 1 --stage2-epochs 2 --frequency-scale 0.25 --frequency-branch-dropout 0.20 --frequency-mask-prob 0.0 --run-name smoke_alpha025
+```
+
+For a longer experiment, use 25,000 samples, two Stage 1 epochs, and five Stage
+2 epochs. Automatically named V2 checkpoints refuse to overwrite an existing
+file; choose a new `--run-name`, or use an explicit `--checkpoint` when an
+overwrite is intentional. Examples:
+
+```text
+checkpoints/hybrid_v2_balanced_all_sources_best.pt
+checkpoints/hybrid_v2_alpha025_all_sources_best.pt
+checkpoints/hybrid_v2_alpha025_holdout_ddpm_best.pt
+```
+
+EfficientNet, Hybrid V1, and Hybrid V2 checkpoints remain independently
+loadable by prediction, evaluation, robustness, and ByteDance validation.
+
 Evaluate the saved model:
 
 ```powershell
@@ -264,6 +301,8 @@ python main.py train --image-size 64 --epochs 1 --num-workers 0
 - `checkpoints/efficientnet_balanced_all_sources_best.pt` contains the all-source-balanced model.
 - `checkpoints/hybrid_balanced_all_sources_best.pt` contains the all-source hybrid model.
 - `checkpoints/hybrid_balanced_holdout_<source>_best.pt` contains a hybrid held-out experiment.
+- `checkpoints/hybrid_v2_balanced_all_sources_best.pt` contains the default Hybrid V2 experiment.
+- `checkpoints/hybrid_v2_<run>_all_sources_best.pt` contains a named Hybrid V2 experiment.
 - `results/robustness.json` contains robustness metrics.
 
 Run `python main.py --help` to see all options.
