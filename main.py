@@ -246,8 +246,8 @@ def build_parser() -> argparse.ArgumentParser:
         type=Path,
         default=None,
         help=(
-            "Prepared robustness root containing distortions.csv. Defaults to "
-            "the <validation-dir>_distorted sibling."
+            "Optional prepared robustness root containing distortions.csv. "
+            "Omit it to apply every condition in memory without saving images."
         ),
     )
     parser.add_argument(
@@ -636,16 +636,11 @@ def main() -> None:
         return
 
     if args.command == "robustness-matrix":
-        distorted_path = args.distorted_dir
-        if distorted_path is None:
-            distorted_path = args.validation_dir.with_name(
-                f"{args.validation_dir.name}_distorted"
-            )
         try:
             run_robustness_matrix(
                 checkpoint_path=checkpoint_path,
                 validation_dir=args.validation_dir,
-                distorted_dir=distorted_path,
+                distorted_dir=args.distorted_dir,
                 device=device,
                 probability_threshold=args.probability_threshold,
                 batch_size=args.batch_size,
@@ -653,6 +648,7 @@ def main() -> None:
                 num_workers=args.num_workers,
                 run_name=args.run_name,
                 only=args.only,
+                seed=args.seed,
             )
         except (OSError, ValueError) as error:
             parser.error(str(error))

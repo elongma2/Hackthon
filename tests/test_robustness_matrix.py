@@ -14,12 +14,13 @@ from PIL import Image
 
 import main as app
 import src.robustness_matrix as robustness_matrix_module
-from src.distort_dataset2 import generate, required_variants
+from src.distort_dataset2 import _save_variant, generate, required_variants
 from src.distort_folder import distort_folder
 from src.robustness_matrix import (
     DISTORTION_CONDITION_IDS,
     ROBUSTNESS_CONDITION_IDS,
     audit_prepared_robustness_data,
+    apply_live_condition,
     calculate_robustness_metrics,
     map_manifest_condition,
     run_robustness_matrix,
@@ -83,6 +84,22 @@ class RobustnessManifestTests(unittest.TestCase):
         }
         self.assertEqual(mapped, set(DISTORTION_CONDITION_IDS))
         self.assertEqual(len(mapped), 19)
+
+    def test_live_conditions_match_existing_generator_pixels_without_persistent_files(self) -> None:
+        image = Image.new("RGB", (15, 11), color=(80, 130, 190))
+        source_id = "FAKE/example.jpg"
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            for variant in required_variants(image, 42, source_id):
+                condition_id = map_manifest_condition(variant.transform, variant.parameters)
+                expected_path = root / f"{condition_id}{variant.suffix}"
+                _save_variant(variant, expected_path)
+                with Image.open(expected_path) as expected_image:
+                    expected = expected_image.convert("RGB")
+                    expected.load()
+                live = apply_live_condition(image, condition_id, 42, source_id)
+                self.assertEqual(live.size, expected.size, condition_id)
+                self.assertEqual(live.tobytes(), expected.tobytes(), condition_id)
 
     def test_both_existing_manifest_schemas_are_supported(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -301,7 +318,33 @@ class RobustnessMetricAndWorkflowTests(unittest.TestCase):
                         run_name="Final V31", only="clean", results_root=results_root,
                     )
 
-    def test_cli_parsing_and_dispatch_use_default_sibling_without_existing_command_changes(self) -> None:
+    def test_live_mode_uses_clean_images_without_creating_distorted_files(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            clean = create_clean(root / "validation")
+            model = ConstantRealLogit()
+            with patch("src.robustness_matrix.load_model", return_value=model) as load_mock:
+                summary = run_robustness_matrix(
+                    checkpoint_path=root / "model.pt",
+                    validation_dir=clean,
+                    distorted_dir=None,
+                    device=torch.device("cpu"),
+                    probability_threshold=0.5,
+                    batch_size=2,
+                    image_size=(8, 8),
+                    num_workers=0,
+                    run_name="live_blur",
+                    only="blur_2",
+                    results_root=root / "results",
+                    seed=42,
+                )
+            load_mock.assert_called_once()
+            self.assertEqual(summary["evaluation_mode"], "on_the_fly")
+            self.assertEqual(summary["audit"]["schema"], "on_the_fly")
+            self.assertEqual(set(summary["conditions"]), {"clean", "blur_2"})
+            self.assertFalse((root / "validation_distorted").exists())
+
+    def test_cli_defaults_to_live_mode_without_changing_existing_commands(self) -> None:
         parsed = app.build_parser().parse_args(
             [
                 "robustness-matrix",
@@ -327,7 +370,7 @@ class RobustnessMetricAndWorkflowTests(unittest.TestCase):
             patch("main.run_robustness_matrix") as run_mock,
         ):
             app.main()
-        self.assertEqual(run_mock.call_args.kwargs["distorted_dir"], Path("validation_distorted"))
+        self.assertIsNone(run_mock.call_args.kwargs["distorted_dir"])
         self.assertEqual(run_mock.call_args.kwargs["only"], "clean")
 
 

@@ -8,16 +8,23 @@ import math
 import re
 from collections import Counter
 from dataclasses import dataclass
+from io import BytesIO
 from pathlib import Path, PurePosixPath
 from typing import Iterable, Mapping, Sequence
 
 import torch
 import torch.nn as nn
-from PIL import Image, ImageOps, UnidentifiedImageError
+from PIL import Image, ImageEnhance, ImageFilter, ImageOps, UnidentifiedImageError
 from sklearn.metrics import roc_auc_score
 from torch.utils.data import DataLoader, Dataset
 
 from .evaluate import evaluate
+from .distort_dataset2 import (
+    _center_crop,
+    _gaussian_noise,
+    _resize_down_then_up,
+    _stable_seed,
+)
 from .model import expects_unnormalized_input, load_model
 from .transforms import build_eval_transforms
 
@@ -89,7 +96,7 @@ class ManifestRow:
 @dataclass
 class AuditResult:
     schema: str
-    manifest_path: Path
+    manifest_path: Path | None
     clean_records: list[ImageRecord]
     condition_records: dict[str, list[ImageRecord]]
     present_conditions: list[str]
@@ -101,7 +108,7 @@ class AuditResult:
     def serializable(self) -> dict[str, object]:
         return {
             "schema": self.schema,
-            "manifest_path": str(self.manifest_path),
+            "manifest_path": None if self.manifest_path is None else str(self.manifest_path),
             "present_conditions": self.present_conditions,
             "missing_conditions": self.missing_conditions,
             "unexpected_conditions": self.unexpected_conditions,
@@ -288,6 +295,64 @@ def _readable_image(path: Path) -> tuple[tuple[int, int], str | None]:
     except (OSError, UnidentifiedImageError) as exc:
         raise ValueError(f"Unreadable image {path}: {exc}") from exc
     return size, image_format
+
+
+def _jpeg_in_memory(image: Image.Image, quality: int) -> Image.Image:
+    """Apply the same one-pass JPEG settings used by the prepared generator."""
+    buffer = BytesIO()
+    image.save(
+        buffer,
+        format="JPEG",
+        quality=quality,
+        subsampling="4:2:0",
+        optimize=False,
+    )
+    buffer.seek(0)
+    with Image.open(buffer) as compressed:
+        result = compressed.convert("RGB")
+        result.load()
+    return result
+
+
+def apply_live_condition(
+    image: Image.Image,
+    condition_id: str,
+    seed: int,
+    source_id: str,
+) -> Image.Image:
+    """Apply one official condition in memory without writing an image file."""
+    if condition_id not in CONDITION_BY_ID:
+        raise ValueError(f"Unknown robustness condition: {condition_id!r}")
+    rgb = image.convert("RGB")
+    if condition_id == "clean":
+        return rgb
+    if condition_id.startswith("jpeg_"):
+        return _jpeg_in_memory(rgb, int(condition_id.split("_", 1)[1]))
+    blur_sigmas = {"blur_05": 0.5, "blur_1": 1.0, "blur_2": 2.0}
+    if condition_id in blur_sigmas:
+        return rgb.filter(ImageFilter.GaussianBlur(radius=blur_sigmas[condition_id]))
+    resize_scales = {"resize_05": 0.5, "resize_025": 0.25}
+    if condition_id in resize_scales:
+        return _resize_down_then_up(rgb, resize_scales[condition_id])
+    noise_sigmas = {"noise_002": 0.02, "noise_005": 0.05, "noise_010": 0.10}
+    if condition_id in noise_sigmas:
+        tag = CONDITION_BY_ID[condition_id].expected_tag
+        variant_seed = _stable_seed(seed, source_id, tag)
+        return _gaussian_noise(rgb, noise_sigmas[condition_id], variant_seed)
+    color_conditions = {
+        "brightness_m20": (ImageEnhance.Brightness, 0.8),
+        "brightness_p20": (ImageEnhance.Brightness, 1.2),
+        "contrast_m20": (ImageEnhance.Contrast, 0.8),
+        "contrast_p20": (ImageEnhance.Contrast, 1.2),
+        "saturation_m20": (ImageEnhance.Color, 0.8),
+        "saturation_p20": (ImageEnhance.Color, 1.2),
+    }
+    if condition_id in color_conditions:
+        enhancer, factor = color_conditions[condition_id]
+        return enhancer(rgb).enhance(factor)
+    if condition_id == "crop_80":
+        return _center_crop(rgb, 0.8)
+    raise AssertionError(f"Missing live implementation for {condition_id}")
 
 
 def _check_condition_image(
@@ -535,6 +600,35 @@ def audit_prepared_robustness_data(
     )
 
 
+def audit_live_robustness_data(validation_dir: str | Path) -> AuditResult:
+    """Verify the clean source set used for deterministic in-memory conditions."""
+    clean_records, _ = _clean_records(Path(validation_dir))
+    for record in clean_records:
+        _readable_image(record.path)
+    counter = Counter(record.label for record in clean_records)
+    clean_counts = {
+        "total": len(clean_records),
+        "FAKE": counter[FAKE_LABEL],
+        "REAL": counter[REAL_LABEL],
+    }
+    return AuditResult(
+        schema="on_the_fly",
+        manifest_path=None,
+        clean_records=clean_records,
+        condition_records={
+            condition_id: clean_records for condition_id in ROBUSTNESS_CONDITION_IDS
+        },
+        present_conditions=list(DISTORTION_CONDITION_IDS),
+        missing_conditions=[],
+        unexpected_conditions=[],
+        counts={
+            condition_id: dict(clean_counts)
+            for condition_id in ROBUSTNESS_CONDITION_IDS
+        },
+        warnings=[],
+    )
+
+
 class PreparedConditionDataset(Dataset):
     """Read one audited condition without changing its order or membership."""
 
@@ -550,6 +644,38 @@ class PreparedConditionDataset(Dataset):
         with Image.open(record.path) as image:
             value = self.transform(image.convert("RGB"))
         return value, record.label, record.source_id
+
+
+class LiveConditionDataset(Dataset):
+    """Apply one deterministic condition to clean images without saving variants."""
+
+    def __init__(
+        self,
+        records: Sequence[ImageRecord],
+        transform,
+        condition_id: str,
+        seed: int,
+    ) -> None:
+        self.records = tuple(records)
+        self.transform = transform
+        self.condition_id = condition_id
+        self.seed = seed
+
+    def __len__(self) -> int:
+        return len(self.records)
+
+    def __getitem__(self, index: int):
+        record = self.records[index]
+        with Image.open(record.path) as opened:
+            original = ImageOps.exif_transpose(opened).convert("RGB")
+            original.load()
+        conditioned = apply_live_condition(
+            original,
+            self.condition_id,
+            self.seed,
+            record.source_id,
+        )
+        return self.transform(conditioned), record.label, record.source_id
 
 
 def calculate_robustness_metrics(
@@ -705,7 +831,11 @@ def _write_outputs(
 def print_audit(audit: AuditResult) -> None:
     """Print the prepared-data findings before checkpoint loading."""
     print("\n--- Robustness Matrix Preflight Audit ---\n")
-    print(f"Manifest: {audit.manifest_path}")
+    print(
+        "Manifest: not used (conditions are generated in memory)"
+        if audit.manifest_path is None
+        else f"Manifest: {audit.manifest_path}"
+    )
     print(f"Schema: {audit.schema}")
     print("Present conditions: " + (", ".join(audit.present_conditions) or "none"))
     print("Missing conditions: " + (", ".join(audit.missing_conditions) or "none"))
@@ -722,7 +852,7 @@ def print_audit(audit: AuditResult) -> None:
 def run_robustness_matrix(
     checkpoint_path: str | Path,
     validation_dir: str | Path,
-    distorted_dir: str | Path,
+    distorted_dir: str | Path | None,
     device: torch.device,
     probability_threshold: float = 0.5,
     batch_size: int = 32,
@@ -731,12 +861,15 @@ def run_robustness_matrix(
     run_name: str = "robustness",
     only: str | None = None,
     results_root: str | Path = "results/robustness",
+    seed: int = 42,
 ) -> dict[str, object]:
-    """Audit prepared files, load one checkpoint, and evaluate the selected matrix."""
+    """Audit inputs, load one checkpoint, and evaluate the selected matrix."""
     if not math.isfinite(probability_threshold) or not 0.0 <= probability_threshold <= 1.0:
         raise ValueError("--probability-threshold must be between 0 and 1")
     if batch_size < 1:
         raise ValueError("--batch-size must be at least 1")
+    if only is not None and only not in CONDITION_BY_ID:
+        raise ValueError(f"Unknown robustness condition: {only!r}")
     run_slug = sanitize_run_name(run_name)
     output_dir = Path(results_root) / run_slug
     if output_dir.exists():
@@ -744,7 +877,11 @@ def run_robustness_matrix(
             f"Robustness result directory already exists: {output_dir}. Choose a new --run-name."
         )
 
-    audit = audit_prepared_robustness_data(validation_dir, distorted_dir, only=only)
+    live_mode = distorted_dir is None
+    if live_mode:
+        audit = audit_live_robustness_data(validation_dir)
+    else:
+        audit = audit_prepared_robustness_data(validation_dir, distorted_dir, only=only)
     print_audit(audit)
     model = load_model(checkpoint_path, device)
     transform = build_eval_transforms(
@@ -759,7 +896,16 @@ def run_robustness_matrix(
     predictions: dict[str, list[dict[str, object]]] = {}
     for condition_id in condition_ids:
         records = audit.condition_records[condition_id]
-        dataset = PreparedConditionDataset(records, transform)
+        dataset: Dataset
+        if live_mode:
+            dataset = LiveConditionDataset(
+                records,
+                transform,
+                condition_id=condition_id,
+                seed=seed,
+            )
+        else:
+            dataset = PreparedConditionDataset(records, transform)
         loader = DataLoader(
             dataset,
             batch_size=batch_size,
@@ -813,7 +959,9 @@ def run_robustness_matrix(
         "run_slug": run_slug,
         "checkpoint": str(Path(checkpoint_path)),
         "validation_dir": str(Path(validation_dir)),
-        "distorted_dir": str(Path(distorted_dir)),
+        "distorted_dir": None if distorted_dir is None else str(Path(distorted_dir)),
+        "evaluation_mode": "on_the_fly" if live_mode else "prepared_manifest",
+        "distortion_seed": seed,
         "probability_threshold": probability_threshold,
         "label_semantics": {
             "FAKE": FAKE_LABEL,

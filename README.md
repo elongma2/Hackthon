@@ -353,22 +353,23 @@ Run only the robustness benchmark:
 python main.py robustness
 ```
 
-Evaluate a checkpoint against the clean ByteDance validation set and every
-prepared condition recorded in `validation_distorted/distortions.csv`:
+Evaluate a checkpoint against the clean ByteDance validation set and apply all
+19 conditions deterministically in memory. No distorted image files are saved:
 
 ```powershell
-python main.py robustness-matrix --checkpoint checkpoints/model.pt --validation-dir validation --distorted-dir validation_distorted --probability-threshold 0.63 --batch-size 32 --run-name final_v31
+python main.py robustness-matrix --checkpoint checkpoints/model.pt --validation-dir validation --probability-threshold 0.63 --batch-size 32 --run-name final_v31
 ```
 
-The manifest controls condition mapping; copied absolute paths are matched to
-stable paths such as `FAKE/example.jpg`. The command audits labels, source
-parity, file readability, formats, and dimensions before loading the model. It
-never creates distortions or changes the threshold between conditions. To run
-clean plus one prepared condition:
+The command uses the same clean images, checkpoint, preprocessing, and fixed
+threshold for every condition. To run clean plus one condition:
 
 ```powershell
-python main.py robustness-matrix --checkpoint checkpoints/model.pt --validation-dir validation --distorted-dir validation_distorted --probability-threshold 0.63 --batch-size 32 --run-name jpeg30_check --only jpeg_30
+python main.py robustness-matrix --checkpoint checkpoints/model.pt --validation-dir validation --probability-threshold 0.63 --batch-size 32 --run-name jpeg30_check --only jpeg_30
 ```
+
+Existing prepared files remain supported by explicitly adding
+`--distorted-dir validation_distorted`; that mode requires its
+`distortions.csv` manifest and performs the full manifest audit.
 
 Classify one image:
 
