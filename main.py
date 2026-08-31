@@ -74,6 +74,10 @@ from src.multisource_dataset import (
 )
 from src.predict import predict_image
 from src.robustness import run_robustness_benchmark
+from src.robustness_matrix import (
+    ROBUSTNESS_CONDITION_IDS,
+    run_robustness_matrix,
+)
 from src.source_balanced import (
     DEFAULT_BALANCED_SEED,
     DEFAULT_SAMPLES_PER_EPOCH,
@@ -120,6 +124,7 @@ def build_parser() -> argparse.ArgumentParser:
             "train-hybrid-v31",
             "evaluate",
             "robustness",
+            "robustness-matrix",
             "predict",
             "validate-bytedance",
             "prepare-data",
@@ -200,7 +205,10 @@ def build_parser() -> argparse.ArgumentParser:
         "--run-name",
         type=str,
         default=None,
-        help="Optional Hybrid V2/V3/V3.1 run name used in its checkpoint path.",
+        help=(
+            "Optional Hybrid V2/V3/V3.1 checkpoint run name; required for "
+            "robustness-matrix result output."
+        ),
     )
     parser.add_argument(
         "--radial-bins",
@@ -232,6 +240,27 @@ def build_parser() -> argparse.ArgumentParser:
         type=Path,
         default=Path("validation"),
         help="ByteDance validation ImageFolder root.",
+    )
+    parser.add_argument(
+        "--distorted-dir",
+        type=Path,
+        default=None,
+        help=(
+            "Prepared robustness root containing distortions.csv. Defaults to "
+            "the <validation-dir>_distorted sibling."
+        ),
+    )
+    parser.add_argument(
+        "--probability-threshold",
+        type=float,
+        default=0.5,
+        help="Fixed P(REAL) decision threshold for robustness-matrix (default: 0.5).",
+    )
+    parser.add_argument(
+        "--only",
+        choices=ROBUSTNESS_CONDITION_IDS,
+        default=None,
+        help="Evaluate clean plus one prepared robustness condition.",
     )
     parser.add_argument("--image", type=Path, help="Image to classify with the predict command.")
     parser.add_argument("--epochs", type=int, default=5, help="Epochs for baseline training.")
@@ -449,6 +478,22 @@ def main() -> None:
             parser.error("--v2-checkpoint is supported by train-hybrid-v3 only")
     if args.command == "prepare-data" and not 0.0 < args.train_ratio < 1.0:
         parser.error("--train-ratio must be greater than 0 and less than 1")
+    if args.command == "robustness-matrix":
+        if args.checkpoint is None:
+            parser.error("--checkpoint is required for robustness-matrix")
+        if args.run_name is None:
+            parser.error("--run-name is required for robustness-matrix")
+        if not re.sub(
+            r"[^a-z0-9]+",
+            "_",
+            args.run_name.strip().casefold(),
+        ).strip("_"):
+            parser.error("--run-name must contain at least one letter or number")
+        if (
+            not math.isfinite(args.probability_threshold)
+            or not 0.0 <= args.probability_threshold <= 1.0
+        ):
+            parser.error("--probability-threshold must be between 0 and 1")
 
     wildfake_path = (
         args.wildfake_dir
@@ -588,6 +633,29 @@ def main() -> None:
             checkpoint_path=checkpoint_path,
             heldout_generator=canonical_holdout,
         )
+        return
+
+    if args.command == "robustness-matrix":
+        distorted_path = args.distorted_dir
+        if distorted_path is None:
+            distorted_path = args.validation_dir.with_name(
+                f"{args.validation_dir.name}_distorted"
+            )
+        try:
+            run_robustness_matrix(
+                checkpoint_path=checkpoint_path,
+                validation_dir=args.validation_dir,
+                distorted_dir=distorted_path,
+                device=device,
+                probability_threshold=args.probability_threshold,
+                batch_size=args.batch_size,
+                image_size=image_size,
+                num_workers=args.num_workers,
+                run_name=args.run_name,
+                only=args.only,
+            )
+        except (OSError, ValueError) as error:
+            parser.error(str(error))
         return
 
     if args.command == "train-hybrid":

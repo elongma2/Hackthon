@@ -353,6 +353,23 @@ Run only the robustness benchmark:
 python main.py robustness
 ```
 
+Evaluate a checkpoint against the clean ByteDance validation set and every
+prepared condition recorded in `validation_distorted/distortions.csv`:
+
+```powershell
+python main.py robustness-matrix --checkpoint checkpoints/model.pt --validation-dir validation --distorted-dir validation_distorted --probability-threshold 0.63 --batch-size 32 --run-name final_v31
+```
+
+The manifest controls condition mapping; copied absolute paths are matched to
+stable paths such as `FAKE/example.jpg`. The command audits labels, source
+parity, file readability, formats, and dimensions before loading the model. It
+never creates distortions or changes the threshold between conditions. To run
+clean plus one prepared condition:
+
+```powershell
+python main.py robustness-matrix --checkpoint checkpoints/model.pt --validation-dir validation --distorted-dir validation_distorted --probability-threshold 0.63 --batch-size 32 --run-name jpeg30_check --only jpeg_30
+```
+
 Classify one image:
 
 ```powershell
@@ -381,5 +398,7 @@ python main.py train --image-size 64 --epochs 1 --num-workers 0
 - `checkpoints/hybrid_v3_<run>_all_sources_best.pt` contains a named Hybrid V3 experiment.
 - `checkpoints/hybrid_v31_<run>_all_sources_best.pt` contains a named Hybrid V3.1 experiment.
 - `results/robustness.json` contains robustness metrics.
+- `results/robustness/<run>/` contains manifest-audited matrix summaries and
+  per-image predictions for a named robustness run.
 
 Run `python main.py --help` to see all options.
