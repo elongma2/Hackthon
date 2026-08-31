@@ -156,7 +156,8 @@ Automatic V3.1 paths refuse to overwrite an existing checkpoint.
 
 ## Evaluation
 
-ByteDance validation is optional evaluation data, never training data:
+ByteDance validation is optional evaluation data, never training data, images should be store in a validation directory with
+a REAL and FAKE folder:
 
 ```powershell
 uv run --no-sync python main.py validate-bytedance --checkpoint checkpoints/hybrid_v31_midjourney_50k_7epoch_all_sources_best.pt --validation-dir validation --data-dir data/raw --batch-size 32
