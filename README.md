@@ -164,6 +164,43 @@ python main.py validate-bytedance `
     --checkpoint checkpoints/efficientnet_balanced_holdout_ddpm_best.pt
 ```
 
+### Progressive deeper EfficientNet fine-tuning
+
+Run the additive three-stage EfficientNet-B0 experiment with one FAKE source
+reserved for held-out-generator validation:
+
+```powershell
+python main.py train-efficientnet-deeper `
+    --data-dir data/raw/cifake `
+    --wildfake-dir data/raw/WildFake `
+    --holdout-fake-source ddpm `
+    --samples-per-epoch 100000 `
+    --batch-size 32 `
+    --stage1-epochs 2 `
+    --stage2-epochs 2 `
+    --stage3-epochs 3 `
+    --seed 42 `
+    --run-name ddpm_progressive
+```
+
+The same ImageNet-pretrained EfficientNet-B0 continues through all stages:
+
+- Stage 1 trains only the classifier at `1e-4`.
+- Stage 2 adds blocks 6-8 at `1e-5` and starts a stage-local cosine schedule.
+- Stage 3 adds blocks 4-5 at `3e-6`, restores all configured base rates, and
+  starts a fresh cosine schedule.
+
+AdamW state remains continuous for parameters already being trained. Frozen
+blocks stay in evaluation mode so their BatchNorm statistics cannot drift. The
+folder named `TEST` for the excluded generator is used as held-out-generator
+validation during checkpoint selection; it is not described as an untouched
+final test set.
+
+The command creates
+`checkpoints/efficientnet_deeper_ddpm_progressive_best.pt`. It refuses any
+existing automatic or explicit output path, never reads an older trained
+checkpoint, and writes its copied best state exactly once after the run.
+
 ### Hybrid spatial-frequency model
 
 The optional hybrid detector keeps EfficientNet-B0 as a 1,280-dimensional

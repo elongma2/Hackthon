@@ -84,6 +84,14 @@ from src.source_balanced import (
     get_source_balanced_data_loaders,
 )
 from src.train import train_model, train_staged_model
+from src.train_deeper import (
+    DEFAULT_CLASSIFIER_LR,
+    DEFAULT_LATE_BLOCKS_LR,
+    DEFAULT_MIDDLE_BLOCKS_LR,
+    DEFAULT_STAGE2_EPOCHS as DEFAULT_DEEPER_STAGE2_EPOCHS,
+    DEFAULT_STAGE3_EPOCHS,
+    train_progressive_deeper,
+)
 
 
 DEFAULT_CHECKPOINT = Path("checkpoints/best_model.pt")
@@ -118,6 +126,7 @@ def build_parser() -> argparse.ArgumentParser:
             "train-staged",
             "train-multisource",
             "train-source-balanced",
+            "train-efficientnet-deeper",
             "train-hybrid",
             "train-hybrid-v2",
             "train-hybrid-v3",
@@ -139,8 +148,9 @@ def build_parser() -> argparse.ArgumentParser:
         help=(
             "Checkpoint path. Uses the multisource checkpoint for train-multisource, "
             "an all-source or holdout-specific checkpoint for source-balanced and "
-            "hybrid training, the staged checkpoint for train-staged and "
-            "validate-bytedance, and the baseline checkpoint otherwise."
+            "hybrid training, a new output path for train-efficientnet-deeper, "
+            "the staged checkpoint for train-staged and validate-bytedance, and "
+            "the baseline checkpoint otherwise."
         ),
     )
     parser.add_argument(
@@ -150,6 +160,15 @@ def build_parser() -> argparse.ArgumentParser:
         help=(
             "Optional WildFake FAKE source excluded from train-source-balanced or "
             "a hybrid command. Omit it to train on every prepared source."
+        ),
+    )
+    parser.add_argument(
+        "--holdout-fake-source",
+        type=str,
+        default=None,
+        help=(
+            "Required WildFake FAKE source reserved for held-out-generator "
+            "validation by train-efficientnet-deeper."
         ),
     )
     parser.add_argument(
@@ -207,7 +226,7 @@ def build_parser() -> argparse.ArgumentParser:
         default=None,
         help=(
             "Optional Hybrid V2/V3/V3.1 checkpoint run name; required for "
-            "robustness-matrix result output."
+            "train-efficientnet-deeper and robustness-matrix output."
         ),
     )
     parser.add_argument(
@@ -268,16 +287,41 @@ def build_parser() -> argparse.ArgumentParser:
         "--stage1-epochs",
         type=int,
         default=2,
-        help="Frozen-spatial warm-up epochs for hybrid training (default: 2).",
+        help="Frozen-spatial/classifier-only warm-up epochs (default: 2).",
     )
     parser.add_argument(
         "--stage2-epochs",
         type=int,
-        default=5,
+        default=None,
         help=(
             "Partial-unfreezing epochs (default: 5). EfficientNet-only staged "
-            "training still uses its fixed two head-only epochs."
+            "training still uses its fixed two head-only epochs; "
+            "train-efficientnet-deeper defaults to 2."
         ),
+    )
+    parser.add_argument(
+        "--stage3-epochs",
+        type=int,
+        default=DEFAULT_STAGE3_EPOCHS,
+        help="Deeper partial-unfreezing epochs (default: 3).",
+    )
+    parser.add_argument(
+        "--classifier-lr",
+        type=float,
+        default=DEFAULT_CLASSIFIER_LR,
+        help="Progressive EfficientNet classifier base learning rate (default: 1e-4).",
+    )
+    parser.add_argument(
+        "--late-blocks-lr",
+        type=float,
+        default=DEFAULT_LATE_BLOCKS_LR,
+        help="Progressive EfficientNet blocks 6-8 base learning rate (default: 1e-5).",
+    )
+    parser.add_argument(
+        "--middle-blocks-lr",
+        type=float,
+        default=DEFAULT_MIDDLE_BLOCKS_LR,
+        help="Progressive EfficientNet blocks 4-5 base learning rate (default: 3e-6).",
     )
     parser.add_argument("--batch-size", type=int, default=32)
     parser.add_argument("--learning-rate", type=float, default=1e-4)
@@ -310,6 +354,17 @@ def resolve_checkpoint_path(
     """Choose a command-specific checkpoint unless the user supplied one."""
     if checkpoint is not None:
         return checkpoint
+    if command == "train-efficientnet-deeper":
+        if run_name is None:
+            raise ValueError("--run-name is required for train-efficientnet-deeper.")
+        run_slug = re.sub(
+            r"[^a-z0-9]+",
+            "_",
+            run_name.strip().casefold(),
+        ).strip("_")
+        if not run_slug:
+            raise ValueError("--run-name must contain at least one letter or number.")
+        return Path(f"checkpoints/efficientnet_deeper_{run_slug}_best.pt")
     if command == "train-source-balanced":
         if holdout is None:
             return DEFAULT_ALL_SOURCE_BALANCED_CHECKPOINT
@@ -436,10 +491,53 @@ def main() -> None:
     """Parse the command and run exactly one training or evaluation workflow."""
     parser = build_parser()
     args = parser.parse_args()
+    if args.stage2_epochs is None:
+        args.stage2_epochs = (
+            DEFAULT_DEEPER_STAGE2_EPOCHS
+            if args.command == "train-efficientnet-deeper"
+            else 5
+        )
     if args.samples_per_epoch < 1:
         parser.error("--samples-per-epoch must be at least 1")
     if args.stage1_epochs < 1:
         parser.error("--stage1-epochs must be at least 1")
+    if args.stage2_epochs < 1:
+        parser.error("--stage2-epochs must be at least 1")
+    if args.command == "train-efficientnet-deeper":
+        if args.stage3_epochs < 1:
+            parser.error("--stage3-epochs must be at least 1")
+        if args.holdout_fake_source is None or not args.holdout_fake_source.strip():
+            parser.error(
+                "--holdout-fake-source is required for train-efficientnet-deeper"
+            )
+        if args.run_name is None or not re.sub(
+            r"[^a-z0-9]+",
+            "_",
+            args.run_name.strip().casefold(),
+        ).strip("_"):
+            parser.error(
+                "--run-name with at least one letter or number is required for "
+                "train-efficientnet-deeper"
+            )
+        if args.holdout is not None:
+            parser.error(
+                "train-efficientnet-deeper uses --holdout-fake-source, not --holdout"
+            )
+        if args.spatial_checkpoint is not None or args.v2_checkpoint is not None:
+            parser.error(
+                "train-efficientnet-deeper starts from ImageNet weights and does not "
+                "accept warm-start checkpoints"
+            )
+        deeper_rates = (
+            args.classifier_lr,
+            args.late_blocks_lr,
+            args.middle_blocks_lr,
+        )
+        if any(not math.isfinite(rate) or rate <= 0.0 for rate in deeper_rates):
+            parser.error(
+                "--classifier-lr, --late-blocks-lr, and --middle-blocks-lr "
+                "must be finite and greater than zero"
+            )
     if args.command in (
         "train-hybrid-v2",
         "train-hybrid-v3",
@@ -512,6 +610,15 @@ def main() -> None:
         return
 
     canonical_holdout = args.holdout
+    canonical_deeper_holdout: str | None = None
+    if args.command == "train-efficientnet-deeper":
+        try:
+            canonical_deeper_holdout = resolve_wildfake_holdout(
+                wildfake_path,
+                args.holdout_fake_source,
+            )
+        except (OSError, ValueError) as error:
+            parser.error(str(error))
     if args.command in (
         "train-source-balanced",
         "train-hybrid",
@@ -535,6 +642,12 @@ def main() -> None:
         )
     except ValueError as error:
         parser.error(str(error))
+    if args.command == "train-efficientnet-deeper" and checkpoint_path.exists():
+        parser.error(
+            "Refusing to overwrite existing progressive EfficientNet checkpoint: "
+            f"{checkpoint_path.resolve()}. Choose a new --run-name or a new explicit "
+            "--checkpoint path."
+        )
     if (
         args.command in (
             "train-hybrid-v2",
@@ -553,6 +666,10 @@ def main() -> None:
             f"Refusing to overwrite existing Hybrid {version} checkpoint: {checkpoint_path}. "
             "Choose a new --run-name or pass an explicit --checkpoint path."
         )
+    if args.command == "train-efficientnet-deeper":
+        print("Initialization: ImageNet-pretrained EfficientNet-B0")
+        print(f"New checkpoint output: {checkpoint_path.resolve()}")
+        print("Checkpoint safety: output path does not exist; existing checkpoints are untouched.")
     device = get_device()
     image_size = (args.image_size, args.image_size)
     print(f"Using device: {device}")
@@ -608,6 +725,43 @@ def main() -> None:
             batch_size=args.batch_size,
             image_size=image_size,
             num_workers=args.num_workers,
+        )
+        return
+
+    if args.command == "train-efficientnet-deeper":
+        if canonical_deeper_holdout is None:
+            raise AssertionError("Progressive EfficientNet holdout was not resolved.")
+        torch.manual_seed(args.seed)
+        if torch.cuda.is_available():
+            torch.cuda.manual_seed_all(args.seed)
+        dataset_path = download_dataset(args.data_dir)
+        train_loader, validation_loader = get_source_balanced_data_loaders(
+            dataset_path,
+            wildfake_path,
+            holdout=canonical_deeper_holdout,
+            batch_size=args.batch_size,
+            samples_per_epoch=args.samples_per_epoch,
+            seed=args.seed,
+            image_size=image_size,
+            num_workers=args.num_workers,
+        )
+        model = build_model(device, pretrained=True)
+        train_progressive_deeper(
+            model,
+            train_loader,
+            validation_loader,
+            device,
+            heldout_generator=canonical_deeper_holdout,
+            checkpoint_path=checkpoint_path,
+            run_name=args.run_name,
+            samples_per_epoch=args.samples_per_epoch,
+            seed=args.seed,
+            stage1_epochs=args.stage1_epochs,
+            stage2_epochs=args.stage2_epochs,
+            stage3_epochs=args.stage3_epochs,
+            classifier_learning_rate=args.classifier_lr,
+            late_blocks_learning_rate=args.late_blocks_lr,
+            middle_blocks_learning_rate=args.middle_blocks_lr,
         )
         return
 

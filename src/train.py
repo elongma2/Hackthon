@@ -28,6 +28,7 @@ def train_one_epoch(
     device: torch.device,
     probability_threshold: float = 0.5,
     frozen_modules: Sequence[nn.Module] = (),
+    trainable_modules: Sequence[nn.Module] = (),
 ) -> tuple[float, float]:
     """Train the currently unfrozen model parameters for one complete epoch."""
     model.train()
@@ -35,6 +36,8 @@ def train_one_epoch(
     # fully frozen feature blocks to evaluation mode for stable frozen features.
     for module in frozen_modules:
         module.eval()
+    for module in trainable_modules:
+        module.train()
 
     running_loss = 0.0
     correct = 0
