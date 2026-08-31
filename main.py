@@ -35,6 +35,38 @@ from src.hybrid_v2_model import (
     build_hybrid_v2_model,
     configure_hybrid_v2_stage,
 )
+from src.hybrid_v3_model import (
+    DEFAULT_MAGNITUDE_WEIGHT,
+    DEFAULT_PHASE_WEIGHT,
+    HYBRID_V3_MODEL_TYPE,
+    V3_FREQUENCY_DROPOUT,
+    V3_FREQUENCY_HIDDEN_DIM,
+    V3_FREQUENCY_LEARNING_RATE,
+    V3_MAGNITUDE_FEATURE_DIM,
+    V3_PHASE_FEATURE_DIM,
+    V3_SPATIAL_FEATURE_DIM,
+    V3_SPATIAL_LEARNING_RATE,
+    build_hybrid_v3_model,
+    configure_hybrid_v3_stage,
+)
+from src.hybrid_v31_model import (
+    DEFAULT_RADIAL_BINS,
+    HYBRID_V31_MODEL_TYPE,
+    MIN_RADIAL_BINS,
+    V31_FREQUENCY_DROPOUT,
+    V31_FREQUENCY_HIDDEN_DIM,
+    V31_FREQUENCY_LEARNING_RATE,
+    V31_MAGNITUDE_FEATURE_DIM,
+    V31_PHASE_FEATURE_DIM,
+    V31_RADIAL_DROPOUT,
+    V31_RADIAL_HIDDEN_DIM,
+    V31_SPATIAL_FEATURE_DIM,
+    V31_SPATIAL_LEARNING_RATE,
+    build_hybrid_v31_model,
+    configure_hybrid_v31_stage,
+    v31_epoch_metadata,
+    v31_validation_forward,
+)
 from src.model import build_model, expects_unnormalized_input, get_device, load_model
 from src.multisource_dataset import (
     get_multisource_data_loaders,
@@ -64,6 +96,12 @@ DEFAULT_ALL_SOURCE_HYBRID_CHECKPOINT = Path(
 DEFAULT_ALL_SOURCE_HYBRID_V2_CHECKPOINT = Path(
     "checkpoints/hybrid_v2_balanced_all_sources_best.pt"
 )
+DEFAULT_ALL_SOURCE_HYBRID_V3_CHECKPOINT = Path(
+    "checkpoints/hybrid_v3_balanced_all_sources_best.pt"
+)
+DEFAULT_ALL_SOURCE_HYBRID_V31_CHECKPOINT = Path(
+    "checkpoints/hybrid_v31_balanced_all_sources_best.pt"
+)
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -78,6 +116,8 @@ def build_parser() -> argparse.ArgumentParser:
             "train-source-balanced",
             "train-hybrid",
             "train-hybrid-v2",
+            "train-hybrid-v3",
+            "train-hybrid-v31",
             "evaluate",
             "robustness",
             "predict",
@@ -104,7 +144,7 @@ def build_parser() -> argparse.ArgumentParser:
         default=None,
         help=(
             "Optional WildFake FAKE source excluded from train-source-balanced or "
-            "either hybrid command. Omit it to train on every prepared source."
+            "a hybrid command. Omit it to train on every prepared source."
         ),
     )
     parser.add_argument(
@@ -113,33 +153,60 @@ def build_parser() -> argparse.ArgumentParser:
         default=None,
         help=(
             "Optional EfficientNet checkpoint used to initialize train-hybrid. "
-            "It also initializes train-hybrid-v2. When omitted, the spatial branch "
-            "uses ImageNet weights."
+            "It also initializes train-hybrid-v2, train-hybrid-v3, and "
+            "train-hybrid-v31. When omitted, the spatial branch uses ImageNet weights."
+        ),
+    )
+    parser.add_argument(
+        "--v2-checkpoint",
+        type=Path,
+        default=None,
+        help=(
+            "Optional exact Hybrid V2 warm start for train-hybrid-v3. Loads spatial "
+            "and magnitude paths; mutually exclusive with --spatial-checkpoint."
         ),
     )
     parser.add_argument(
         "--frequency-scale",
         type=float,
         default=DEFAULT_FREQUENCY_SCALE,
-        help="Fixed Hybrid V2 FFT residual scale (default: 0.25).",
+        help="Fixed Hybrid V2/V3/V3.1 FFT residual scale (default: 0.25).",
     )
     parser.add_argument(
         "--frequency-branch-dropout",
         type=float,
         default=DEFAULT_FREQUENCY_BRANCH_DROPOUT,
-        help="Hybrid V2 training-only FFT branch dropout (default: 0.20).",
+        help="Hybrid V2/V3/V3.1 training-only FFT branch dropout (default: 0.20).",
     )
     parser.add_argument(
         "--frequency-mask-prob",
         type=float,
         default=DEFAULT_FREQUENCY_MASK_PROB,
-        help="Hybrid V2 training-only FFT spectrum masking chance (default: 0.0).",
+        help="Hybrid V2/V3/V3.1 magnitude masking chance (default: 0.0).",
+    )
+    parser.add_argument(
+        "--magnitude-weight",
+        type=float,
+        default=DEFAULT_MAGNITUDE_WEIGHT,
+        help="Hybrid V3 supplied magnitude mixture weight (default: 0.5).",
+    )
+    parser.add_argument(
+        "--phase-weight",
+        type=float,
+        default=DEFAULT_PHASE_WEIGHT,
+        help="Hybrid V3 supplied phase mixture weight (default: 0.5).",
     )
     parser.add_argument(
         "--run-name",
         type=str,
         default=None,
-        help="Optional Hybrid V2 experiment name used in its automatic checkpoint path.",
+        help="Optional Hybrid V2/V3/V3.1 run name used in its checkpoint path.",
+    )
+    parser.add_argument(
+        "--radial-bins",
+        type=int,
+        default=DEFAULT_RADIAL_BINS,
+        help="Hybrid V3.1 radial profile bin count (default: 32; minimum: 4).",
     )
     parser.add_argument(
         "--samples-per-epoch",
@@ -267,6 +334,68 @@ def resolve_checkpoint_path(
         if holdout_slug is None:
             return DEFAULT_ALL_SOURCE_HYBRID_V2_CHECKPOINT
         return Path(f"checkpoints/hybrid_v2_balanced_holdout_{holdout_slug}_best.pt")
+    if command == "train-hybrid-v3":
+        holdout_slug: str | None = None
+        if holdout is not None:
+            holdout_slug = re.sub(
+                r"[^a-z0-9]+",
+                "_",
+                holdout.strip().casefold(),
+            ).strip("_")
+            if not holdout_slug:
+                raise ValueError(
+                    f"Cannot create a safe checkpoint name from holdout {holdout!r}; "
+                    "pass --checkpoint explicitly."
+                )
+        if run_name is not None:
+            run_slug = re.sub(
+                r"[^a-z0-9]+",
+                "_",
+                run_name.strip().casefold(),
+            ).strip("_")
+            if not run_slug:
+                raise ValueError(
+                    f"Cannot create a safe checkpoint name from run name {run_name!r}."
+                )
+            if holdout_slug is None:
+                return Path(f"checkpoints/hybrid_v3_{run_slug}_all_sources_best.pt")
+            return Path(
+                f"checkpoints/hybrid_v3_{run_slug}_holdout_{holdout_slug}_best.pt"
+            )
+        if holdout_slug is None:
+            return DEFAULT_ALL_SOURCE_HYBRID_V3_CHECKPOINT
+        return Path(f"checkpoints/hybrid_v3_balanced_holdout_{holdout_slug}_best.pt")
+    if command == "train-hybrid-v31":
+        holdout_slug: str | None = None
+        if holdout is not None:
+            holdout_slug = re.sub(
+                r"[^a-z0-9]+",
+                "_",
+                holdout.strip().casefold(),
+            ).strip("_")
+            if not holdout_slug:
+                raise ValueError(
+                    f"Cannot create a safe checkpoint name from holdout {holdout!r}; "
+                    "pass --checkpoint explicitly."
+                )
+        if run_name is not None:
+            run_slug = re.sub(
+                r"[^a-z0-9]+",
+                "_",
+                run_name.strip().casefold(),
+            ).strip("_")
+            if not run_slug:
+                raise ValueError(
+                    f"Cannot create a safe checkpoint name from run name {run_name!r}."
+                )
+            if holdout_slug is None:
+                return Path(f"checkpoints/hybrid_v31_{run_slug}_all_sources_best.pt")
+            return Path(
+                f"checkpoints/hybrid_v31_{run_slug}_holdout_{holdout_slug}_best.pt"
+            )
+        if holdout_slug is None:
+            return DEFAULT_ALL_SOURCE_HYBRID_V31_CHECKPOINT
+        return Path(f"checkpoints/hybrid_v31_balanced_holdout_{holdout_slug}_best.pt")
     if command == "train-multisource":
         return DEFAULT_MULTISOURCE_CHECKPOINT
     if command in ("train-staged", "validate-bytedance"):
@@ -282,7 +411,11 @@ def main() -> None:
         parser.error("--samples-per-epoch must be at least 1")
     if args.stage1_epochs < 1:
         parser.error("--stage1-epochs must be at least 1")
-    if args.command == "train-hybrid-v2":
+    if args.command in (
+        "train-hybrid-v2",
+        "train-hybrid-v3",
+        "train-hybrid-v31",
+    ):
         if not math.isfinite(args.frequency_scale) or args.frequency_scale < 0.0:
             parser.error("--frequency-scale must be greater than or equal to 0")
         if not 0.0 <= args.frequency_branch_dropout <= 1.0:
@@ -295,6 +428,25 @@ def main() -> None:
             args.run_name.strip().casefold(),
         ).strip("_"):
             parser.error("--run-name must contain at least one letter or number")
+    if args.command == "train-hybrid-v3":
+        if args.spatial_checkpoint is not None and args.v2_checkpoint is not None:
+            parser.error(
+                "--spatial-checkpoint and --v2-checkpoint are mutually exclusive"
+            )
+        if (
+            not math.isfinite(args.magnitude_weight)
+            or args.magnitude_weight < 0.0
+            or not math.isfinite(args.phase_weight)
+            or args.phase_weight < 0.0
+        ):
+            parser.error("--magnitude-weight and --phase-weight must be nonnegative")
+        if args.magnitude_weight == 0.0 and args.phase_weight == 0.0:
+            parser.error("--magnitude-weight and --phase-weight cannot both be zero")
+    if args.command == "train-hybrid-v31":
+        if args.radial_bins < MIN_RADIAL_BINS:
+            parser.error(f"--radial-bins must be at least {MIN_RADIAL_BINS}")
+        if args.v2_checkpoint is not None:
+            parser.error("--v2-checkpoint is supported by train-hybrid-v3 only")
     if args.command == "prepare-data" and not 0.0 < args.train_ratio < 1.0:
         parser.error("--train-ratio must be greater than 0 and less than 1")
 
@@ -319,6 +471,8 @@ def main() -> None:
         "train-source-balanced",
         "train-hybrid",
         "train-hybrid-v2",
+        "train-hybrid-v3",
+        "train-hybrid-v31",
     ) and args.holdout is not None:
         try:
             canonical_holdout = resolve_wildfake_holdout(
@@ -337,12 +491,21 @@ def main() -> None:
     except ValueError as error:
         parser.error(str(error))
     if (
-        args.command == "train-hybrid-v2"
+        args.command in (
+            "train-hybrid-v2",
+            "train-hybrid-v3",
+            "train-hybrid-v31",
+        )
         and args.checkpoint is None
         and checkpoint_path.exists()
     ):
+        version = {
+            "train-hybrid-v2": "V2",
+            "train-hybrid-v3": "V3",
+            "train-hybrid-v31": "V3.1",
+        }[args.command]
         parser.error(
-            f"Refusing to overwrite existing Hybrid V2 checkpoint: {checkpoint_path}. "
+            f"Refusing to overwrite existing Hybrid {version} checkpoint: {checkpoint_path}. "
             "Choose a new --run-name or pass an explicit --checkpoint path."
         )
     device = get_device()
@@ -577,6 +740,236 @@ def main() -> None:
             stage1_epochs=args.stage1_epochs,
             checkpoint_metadata=checkpoint_metadata,
             stage_configurator=configure_hybrid_v2_stage,
+        )
+        return
+
+    if args.command == "train-hybrid-v3":
+        torch.manual_seed(args.seed)
+        if torch.cuda.is_available():
+            torch.cuda.manual_seed_all(args.seed)
+        dataset_path = download_dataset(args.data_dir)
+        train_loader, validation_loader = get_source_balanced_data_loaders(
+            dataset_path,
+            wildfake_path,
+            holdout=canonical_holdout,
+            batch_size=args.batch_size,
+            samples_per_epoch=args.samples_per_epoch,
+            seed=args.seed,
+            image_size=image_size,
+            num_workers=args.num_workers,
+            normalize_inputs=False,
+        )
+        model = build_hybrid_v3_model(
+            device,
+            spatial_checkpoint=args.spatial_checkpoint,
+            v2_checkpoint=args.v2_checkpoint,
+            frequency_scale=args.frequency_scale,
+            magnitude_weight=args.magnitude_weight,
+            phase_weight=args.phase_weight,
+            frequency_branch_dropout=args.frequency_branch_dropout,
+            frequency_mask_probability=args.frequency_mask_prob,
+        )
+        if model.spatial_classifier_loaded:
+            print(
+                "Hybrid V3 Stage 1: EfficientNet features and the loaded spatial "
+                "classifier are frozen; magnitude and phase paths train at 5e-5."
+            )
+        else:
+            print(
+                "Hybrid V3 Stage 1: EfficientNet features are frozen; the random "
+                "spatial classifier trains at 1e-5 and magnitude/phase paths train "
+                "at 5e-5."
+            )
+        print(
+            "Hybrid V3 Stage 2: EfficientNet blocks 0-5 stay frozen; blocks 6-8 "
+            "and the spatial classifier train at 1e-5; magnitude/phase paths train "
+            "at 5e-5."
+        )
+        if args.v2_checkpoint is not None:
+            spatial_initialization = str(args.v2_checkpoint.resolve())
+            initialization_mode = "hybrid_v2_warm_start"
+        elif args.spatial_checkpoint is not None:
+            spatial_initialization = str(args.spatial_checkpoint.resolve())
+            initialization_mode = "spatial_checkpoint"
+        else:
+            spatial_initialization = "imagenet"
+            initialization_mode = "imagenet"
+        checkpoint_metadata = {
+            "model_type": HYBRID_V3_MODEL_TYPE,
+            "spatial_feature_dim": V3_SPATIAL_FEATURE_DIM,
+            "magnitude_feature_dim": V3_MAGNITUDE_FEATURE_DIM,
+            "phase_feature_dim": V3_PHASE_FEATURE_DIM,
+            "frequency_hidden_dim": V3_FREQUENCY_HIDDEN_DIM,
+            "frequency_dropout": V3_FREQUENCY_DROPOUT,
+            "frequency_scale": args.frequency_scale,
+            "supplied_magnitude_weight": args.magnitude_weight,
+            "supplied_phase_weight": args.phase_weight,
+            "normalized_magnitude_weight": model.magnitude_weight,
+            "normalized_phase_weight": model.phase_weight,
+            "frequency_branch_dropout": args.frequency_branch_dropout,
+            "frequency_mask_prob": args.frequency_mask_prob,
+            "fft_normalization": "ortho",
+            "phase_representation": "sin_cos",
+            "fft_preprocessing": (
+                "single float32 luminance fft2 ortho fftshift; log1p per-image "
+                "standardized magnitude and sine/cosine phase"
+            ),
+            "spatial_initialization": spatial_initialization,
+            "initialization_mode": initialization_mode,
+            "spatial_classifier_loaded": model.spatial_classifier_loaded,
+            "spatial_classifier_source": model.spatial_classifier_source,
+            "magnitude_initialized_from_v2": model.magnitude_initialized_from_v2,
+            "heldout_generator_config": canonical_holdout,
+            "run_name": None if args.run_name is None else args.run_name.strip(),
+            "seed": args.seed,
+            "training_sources": [source.name for source in train_loader.dataset.sources],
+            "validation_sources": [
+                source.name for source in validation_loader.dataset.sources
+            ],
+            "training_config": {
+                "stage1_epochs": args.stage1_epochs,
+                "stage2_epochs": args.stage2_epochs,
+                "stage1_magnitude_learning_rate": V3_FREQUENCY_LEARNING_RATE,
+                "stage1_phase_learning_rate": V3_FREQUENCY_LEARNING_RATE,
+                "stage1_spatial_classifier_learning_rate": (
+                    None
+                    if model.spatial_classifier_loaded
+                    else V3_SPATIAL_LEARNING_RATE
+                ),
+                "stage2_magnitude_learning_rate": V3_FREQUENCY_LEARNING_RATE,
+                "stage2_phase_learning_rate": V3_FREQUENCY_LEARNING_RATE,
+                "stage2_spatial_learning_rate": V3_SPATIAL_LEARNING_RATE,
+                "samples_per_epoch": args.samples_per_epoch,
+                "seed": args.seed,
+            },
+        }
+        train_staged_model(
+            model,
+            train_loader,
+            validation_loader,
+            device,
+            stage2_epochs=args.stage2_epochs,
+            checkpoint_path=checkpoint_path,
+            heldout_generator=canonical_holdout,
+            stage1_epochs=args.stage1_epochs,
+            checkpoint_metadata=checkpoint_metadata,
+            stage_configurator=configure_hybrid_v3_stage,
+        )
+        return
+
+    if args.command == "train-hybrid-v31":
+        torch.manual_seed(args.seed)
+        if torch.cuda.is_available():
+            torch.cuda.manual_seed_all(args.seed)
+        dataset_path = download_dataset(args.data_dir)
+        train_loader, validation_loader = get_source_balanced_data_loaders(
+            dataset_path,
+            wildfake_path,
+            holdout=canonical_holdout,
+            batch_size=args.batch_size,
+            samples_per_epoch=args.samples_per_epoch,
+            seed=args.seed,
+            image_size=image_size,
+            num_workers=args.num_workers,
+            normalize_inputs=False,
+        )
+        model = build_hybrid_v31_model(
+            device,
+            spatial_checkpoint=args.spatial_checkpoint,
+            frequency_scale=args.frequency_scale,
+            frequency_branch_dropout=args.frequency_branch_dropout,
+            frequency_mask_probability=args.frequency_mask_prob,
+            radial_bins=args.radial_bins,
+        )
+        if model.spatial_classifier_loaded:
+            print(
+                "Hybrid V3.1 Stage 1: EfficientNet features and the loaded spatial "
+                "classifier are frozen; magnitude, phase, radial, and learned "
+                "fusion paths train at 5e-5."
+            )
+        else:
+            print(
+                "Hybrid V3.1 Stage 1: EfficientNet features are frozen; the random "
+                "spatial classifier trains at 1e-5 and all frequency paths train "
+                "at 5e-5."
+            )
+        print(
+            "Hybrid V3.1 Stage 2: EfficientNet blocks 0-5 stay frozen; blocks 6-8 "
+            "and the spatial classifier train at 1e-5; magnitude, phase, radial, "
+            "and learned fusion paths train at 5e-5."
+        )
+        spatial_initialization = (
+            "imagenet"
+            if args.spatial_checkpoint is None
+            else str(args.spatial_checkpoint.resolve())
+        )
+        checkpoint_metadata = {
+            "model_type": HYBRID_V31_MODEL_TYPE,
+            "spatial_feature_dim": V31_SPATIAL_FEATURE_DIM,
+            "magnitude_feature_dim": V31_MAGNITUDE_FEATURE_DIM,
+            "phase_feature_dim": V31_PHASE_FEATURE_DIM,
+            "frequency_hidden_dim": V31_FREQUENCY_HIDDEN_DIM,
+            "frequency_dropout": V31_FREQUENCY_DROPOUT,
+            "radial_bins": args.radial_bins,
+            "radial_hidden_dim": V31_RADIAL_HIDDEN_DIM,
+            "radial_dropout": V31_RADIAL_DROPOUT,
+            "frequency_scale": args.frequency_scale,
+            "frequency_branch_dropout": args.frequency_branch_dropout,
+            "frequency_mask_prob": args.frequency_mask_prob,
+            "frequency_fusion_type": "learned_softmax",
+            "initial_frequency_weights": {
+                "magnitude": 1.0 / 3.0,
+                "phase": 1.0 / 3.0,
+                "radial": 1.0 / 3.0,
+            },
+            "fft_normalization": "ortho",
+            "phase_representation": "sin_cos",
+            "radial_representation": (
+                "mean unmasked normalized log-magnitude in cached low-to-high "
+                "annular bins"
+            ),
+            "fft_preprocessing": (
+                "single float32 luminance fft2 ortho fftshift; log1p per-image "
+                "standardized magnitude and sine/cosine phase"
+            ),
+            "spatial_initialization": spatial_initialization,
+            "spatial_classifier_loaded": model.spatial_classifier_loaded,
+            "spatial_classifier_source": model.spatial_classifier_source,
+            "heldout_generator_config": canonical_holdout,
+            "run_name": None if args.run_name is None else args.run_name.strip(),
+            "seed": args.seed,
+            "training_sources": [source.name for source in train_loader.dataset.sources],
+            "validation_sources": [
+                source.name for source in validation_loader.dataset.sources
+            ],
+            "training_config": {
+                "stage1_epochs": args.stage1_epochs,
+                "stage2_epochs": args.stage2_epochs,
+                "stage1_frequency_learning_rate": V31_FREQUENCY_LEARNING_RATE,
+                "stage1_spatial_classifier_learning_rate": (
+                    None
+                    if model.spatial_classifier_loaded
+                    else V31_SPATIAL_LEARNING_RATE
+                ),
+                "stage2_frequency_learning_rate": V31_FREQUENCY_LEARNING_RATE,
+                "stage2_spatial_learning_rate": V31_SPATIAL_LEARNING_RATE,
+                "samples_per_epoch": args.samples_per_epoch,
+                "seed": args.seed,
+            },
+        }
+        train_staged_model(
+            model,
+            train_loader,
+            validation_loader,
+            device,
+            stage2_epochs=args.stage2_epochs,
+            checkpoint_path=checkpoint_path,
+            heldout_generator=canonical_holdout,
+            stage1_epochs=args.stage1_epochs,
+            checkpoint_metadata=checkpoint_metadata,
+            stage_configurator=configure_hybrid_v31_stage,
+            validation_component_forward=v31_validation_forward,
+            epoch_metadata_provider=v31_epoch_metadata,
         )
         return
 

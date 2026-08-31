@@ -245,6 +245,81 @@ checkpoints/hybrid_v2_alpha025_holdout_ddpm_best.pt
 EfficientNet, Hybrid V1, and Hybrid V2 checkpoints remain independently
 loadable by prediction, evaluation, robustness, and ByteDance validation.
 
+### Hybrid V3: magnitude and phase residual
+
+Hybrid V3 keeps the V2 spatial prediction as the primary decision and derives
+two small forensic corrections from one shared float32 luminance FFT. The
+magnitude path models normalized frequency energy, while the phase path uses
+bounded sine/cosine channels to avoid the `-pi`/`+pi` angle discontinuity:
+
+```text
+final_logit = spatial_logit + frequency_scale * (
+    normalized_magnitude_weight * magnitude_logit
+    + normalized_phase_weight * phase_logit
+)
+```
+
+The supplied magnitude and phase weights are normalized to sum to one, so the
+default `0.5/0.5` mixture keeps the total residual scale at `0.25` rather than
+doubling it. Combined branch dropout remains `0.20`; optional masking affects
+only magnitude and remains disabled by default. V3 reuses the prepared dataset,
+source-balanced sampler, robustness augmentation, staged trainer, and existing
+evaluation commands. Performance must be established experimentally.
+
+Run a phase-only smoke experiment:
+
+```powershell
+python main.py train-hybrid-v3 --data-dir data/raw/cifake --wildfake-dir data/raw/WildFake --spatial-checkpoint checkpoints/efficientnet_balanced_all_sources_best.pt --samples-per-epoch 5000 --stage1-epochs 1 --stage2-epochs 2 --frequency-scale 0.25 --magnitude-weight 0 --phase-weight 1 --frequency-branch-dropout 0.20 --frequency-mask-prob 0.0 --batch-size 32 --seed 42 --run-name phase_only_smoke
+```
+
+Run a 50/50 magnitude-plus-phase smoke experiment:
+
+```powershell
+python main.py train-hybrid-v3 --data-dir data/raw/cifake --wildfake-dir data/raw/WildFake --spatial-checkpoint checkpoints/efficientnet_balanced_all_sources_best.pt --samples-per-epoch 5000 --stage1-epochs 1 --stage2-epochs 2 --frequency-scale 0.25 --magnitude-weight 1 --phase-weight 1 --frequency-branch-dropout 0.20 --frequency-mask-prob 0.0 --batch-size 32 --seed 42 --run-name dual_spectrum_smoke
+```
+
+Alternatively, `--v2-checkpoint PATH` strictly warm-starts the spatial and
+magnitude paths from a complete Hybrid V2 checkpoint while initializing phase
+randomly. It cannot be combined with `--spatial-checkpoint`. Automatically
+named V3 checkpoints use `checkpoints/hybrid_v3_<run>_all_sources_best.pt` (or
+the corresponding holdout name) and refuse accidental overwrites. V3
+checkpoints are supported by prediction, evaluation, robustness, and ByteDance
+validation through the existing model-aware loader.
+
+### Hybrid V3.1: radial frequency and learned fusion
+
+Hybrid V3.1 keeps V3 unchanged and adds a 32-bin radial profile that summarizes
+how normalized log-magnitude energy changes from low to high spatial
+frequencies. Magnitude, phase, and radial representations all come from one
+shared float32 FFT. A small radial MLP produces a third frequency logit, and
+three learned scalar parameters are normalized with softmax:
+
+```text
+frequency_logit =
+    w_magnitude * magnitude_logit
+    + w_phase * phase_logit
+    + w_radial * radial_logit
+
+final_logit = spatial_logit + frequency_scale * frequency_logit
+```
+
+The weights start at one third each and always remain nonnegative with a sum of
+one. The overall frequency scale remains fixed at `0.25` by default. After each
+validation epoch, training reports the learned weights and the mean absolute
+spatial, magnitude, phase, and radial logits from the same validation forward.
+These values are diagnostic only and do not alter predictions.
+
+Run a smoke experiment:
+
+```powershell
+python main.py train-hybrid-v31 --data-dir data/raw/cifake --wildfake-dir data/raw/WildFake --spatial-checkpoint checkpoints/efficientnet_balanced_all_sources_best.pt --samples-per-epoch 10000 --stage1-epochs 1 --stage2-epochs 2 --frequency-scale 0.25 --frequency-branch-dropout 0.20 --frequency-mask-prob 0.0 --radial-bins 32 --batch-size 32 --seed 42 --run-name radial32_smoke
+```
+
+For the full comparison, use `--samples-per-epoch 100000`,
+`--stage1-epochs 2`, `--stage2-epochs 5`, and a new run name. Automatically
+named V3.1 checkpoints refuse accidental overwrites. V3.1 is experimental; no
+performance improvement is assumed until it is measured.
+
 Evaluate the saved model:
 
 ```powershell
@@ -303,6 +378,8 @@ python main.py train --image-size 64 --epochs 1 --num-workers 0
 - `checkpoints/hybrid_balanced_holdout_<source>_best.pt` contains a hybrid held-out experiment.
 - `checkpoints/hybrid_v2_balanced_all_sources_best.pt` contains the default Hybrid V2 experiment.
 - `checkpoints/hybrid_v2_<run>_all_sources_best.pt` contains a named Hybrid V2 experiment.
+- `checkpoints/hybrid_v3_<run>_all_sources_best.pt` contains a named Hybrid V3 experiment.
+- `checkpoints/hybrid_v31_<run>_all_sources_best.pt` contains a named Hybrid V3.1 experiment.
 - `results/robustness.json` contains robustness metrics.
 
 Run `python main.py --help` to see all options.

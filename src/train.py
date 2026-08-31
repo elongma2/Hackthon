@@ -11,12 +11,13 @@ import torch.nn as nn
 from torch.utils.data import DataLoader
 from tqdm.auto import tqdm
 
-from .evaluate import evaluate
+from .evaluate import ComponentForward, evaluate
 from .source_balanced import calculate_source_metrics, print_source_metrics
 
 
 StageSetup = tuple[tuple[nn.Module, ...], list[dict[str, object]]]
 StageConfigurator = Callable[[nn.Module, str], StageSetup]
+EpochMetadataProvider = Callable[[nn.Module], Mapping[str, object]]
 
 
 def train_one_epoch(
@@ -115,6 +116,7 @@ def _run_staged_epoch(
     total_epochs: int,
     probability_threshold: float,
     heldout_generator: str | None = None,
+    validation_component_forward: ComponentForward | None = None,
 ) -> dict[str, object]:
     """Run one staged epoch, evaluate it, and assemble its logged metrics."""
     learning_rates = _learning_rates(optimizer)
@@ -134,6 +136,7 @@ def _run_staged_epoch(
         device,
         probability_threshold,
         description=f"Validation ({stage})",
+        component_forward=validation_component_forward,
     )
     validation_auc = validation["auc_roc"]
     if validation_auc is None:
@@ -166,6 +169,13 @@ def _run_staged_epoch(
             probability_threshold,
         )
         metrics.update(source_metrics)
+    branch_diagnostics = validation.get("mean_absolute_branch_logits")
+    if branch_diagnostics is not None:
+        if not isinstance(branch_diagnostics, Mapping):
+            raise TypeError("Validation branch diagnostics must be a mapping.")
+        metrics["validation_mean_absolute_branch_logits"] = dict(
+            branch_diagnostics
+        )
     learning_rate_text = ", ".join(
         f"{name}: {learning_rate:.6g}" for name, learning_rate in learning_rates.items()
     )
@@ -180,6 +190,12 @@ def _run_staged_epoch(
     )
     if heldout_generator is not None:
         print_source_metrics(metrics)
+    if branch_diagnostics is not None:
+        print("Validation mean absolute branch logits:")
+        for name in ("spatial_logit", "magnitude_logit", "phase_logit", "radial_logit"):
+            if name in branch_diagnostics:
+                label = name.removesuffix("_logit")
+                print(f"  {label:<10} {float(branch_diagnostics[name]):.6f}")
     return metrics
 
 
@@ -190,6 +206,7 @@ def _save_staged_checkpoint(
     selection_metric_name: str,
     best_selection_value: float,
     checkpoint_metadata: Mapping[str, object] | None = None,
+    epoch_metadata: Mapping[str, object] | None = None,
 ) -> None:
     """Save model weights together with enough metadata to understand the run."""
     payload: dict[str, object] = {
@@ -219,6 +236,9 @@ def _save_staged_checkpoint(
                 "source_recalls": metrics["source_recalls"],
             }
         )
+    branch_diagnostics = metrics.get("validation_mean_absolute_branch_logits")
+    if branch_diagnostics is not None:
+        payload["validation_mean_absolute_branch_logits"] = branch_diagnostics
     if checkpoint_metadata:
         conflicting = sorted(set(payload) & set(checkpoint_metadata))
         if conflicting:
@@ -227,6 +247,14 @@ def _save_staged_checkpoint(
                 + ", ".join(conflicting)
             )
         payload.update(checkpoint_metadata)
+    if epoch_metadata:
+        conflicting = sorted(set(payload) & set(epoch_metadata))
+        if conflicting:
+            raise ValueError(
+                "Dynamic checkpoint metadata cannot replace reserved keys: "
+                + ", ".join(conflicting)
+            )
+        payload.update(epoch_metadata)
     torch.save(payload, checkpoint_path)
 
 
@@ -245,6 +273,8 @@ def train_staged_model(
     stage2_backbone_learning_rate: float = 1e-5,
     checkpoint_metadata: Mapping[str, object] | None = None,
     stage_configurator: StageConfigurator | None = None,
+    validation_component_forward: ComponentForward | None = None,
+    epoch_metadata_provider: EpochMetadataProvider | None = None,
 ) -> dict[str, object]:
     """Train the head and final feature blocks, saving the best validation model.
 
@@ -301,7 +331,15 @@ def train_staged_model(
             total_epochs,
             probability_threshold,
             heldout_generator,
+            validation_component_forward,
         )
+        epoch_metadata = (
+            dict(epoch_metadata_provider(model))
+            if epoch_metadata_provider is not None
+            else {}
+        )
+        if epoch_metadata:
+            metrics["epoch_metadata"] = epoch_metadata
         history.append(metrics)
         selection_value = float(metrics[selection_metric_name])
         if selection_value > best_selection_value:
@@ -313,6 +351,7 @@ def train_staged_model(
                 selection_metric_name,
                 best_selection_value,
                 checkpoint_metadata,
+                epoch_metadata,
             )
             print(f"Saved best staged checkpoint to {checkpoint_path}")
 
@@ -361,7 +400,15 @@ def train_staged_model(
             total_epochs,
             probability_threshold,
             heldout_generator,
+            validation_component_forward,
         )
+        epoch_metadata = (
+            dict(epoch_metadata_provider(model))
+            if epoch_metadata_provider is not None
+            else {}
+        )
+        if epoch_metadata:
+            metrics["epoch_metadata"] = epoch_metadata
         history.append(metrics)
         selection_value = float(metrics[selection_metric_name])
         if selection_value > best_selection_value:
@@ -373,6 +420,7 @@ def train_staged_model(
                 selection_metric_name,
                 best_selection_value,
                 checkpoint_metadata,
+                epoch_metadata,
             )
             print(f"Saved best staged checkpoint to {checkpoint_path}")
         scheduler.step()
