@@ -9,7 +9,7 @@ The project uses `FAKE = 0`, `REAL = 1`, `sigmoid(logit) = P(REAL)`, and
 
 ## Quick Start: Run on Your Own Images
 
-Put arbitrary images in an unlabeled folder; nested folders are supported.
+Put arbitrary images in an unlabeled folder named my_images; nested folders are supported.
 Checkpoints trained by the team are already provided and can be immediately be use for predicting images.
 Alternatively, you can try replicating the checkpoints by downloading and training on the image folders the team
 has used.
