@@ -11,38 +11,36 @@ import torch
 import torch.nn as nn
 import torchvision.models as models
 
-from .hybrid_v2_model import (
+from .frequency_features import (
     DEFAULT_FREQUENCY_BRANCH_DROPOUT,
     DEFAULT_FREQUENCY_MASK_PROB,
     DEFAULT_FREQUENCY_SCALE,
-)
-from .hybrid_v3_model import (
-    V3_FREQUENCY_DROPOUT,
-    V3_FREQUENCY_HIDDEN_DIM,
-    V3_FREQUENCY_LEARNING_RATE,
-    V3_MAGNITUDE_FEATURE_DIM,
-    V3_PHASE_FEATURE_DIM,
-    V3_SPATIAL_FEATURE_DIM,
-    V3_SPATIAL_LEARNING_RATE,
-    MagnitudeBranchV3,
-    PhaseBranchV3,
+    FREQUENCY_DROPOUT,
+    FREQUENCY_HIDDEN_DIM,
+    FREQUENCY_LEARNING_RATE,
+    MAGNITUDE_FEATURE_DIM,
+    PHASE_FEATURE_DIM,
+    SPATIAL_FEATURE_DIM,
+    SPATIAL_LEARNING_RATE,
+    MagnitudeBranch,
+    PhaseBranch,
     SharedFFTPreprocessor,
-    _build_frequency_head,
-    _checkpoint_state_dict,
-    _validated_feature_state,
-    _validated_spatial_classifier_state,
+    build_frequency_head,
+    checkpoint_state_dict,
+    validated_feature_state,
+    validated_spatial_classifier_state,
 )
 from .transforms import IMAGENET_MEAN, IMAGENET_STD
 
 
 HYBRID_V31_MODEL_TYPE = "hybrid_v31"
-V31_SPATIAL_FEATURE_DIM = V3_SPATIAL_FEATURE_DIM
-V31_MAGNITUDE_FEATURE_DIM = V3_MAGNITUDE_FEATURE_DIM
-V31_PHASE_FEATURE_DIM = V3_PHASE_FEATURE_DIM
-V31_FREQUENCY_HIDDEN_DIM = V3_FREQUENCY_HIDDEN_DIM
-V31_FREQUENCY_DROPOUT = V3_FREQUENCY_DROPOUT
-V31_FREQUENCY_LEARNING_RATE = V3_FREQUENCY_LEARNING_RATE
-V31_SPATIAL_LEARNING_RATE = V3_SPATIAL_LEARNING_RATE
+V31_SPATIAL_FEATURE_DIM = SPATIAL_FEATURE_DIM
+V31_MAGNITUDE_FEATURE_DIM = MAGNITUDE_FEATURE_DIM
+V31_PHASE_FEATURE_DIM = PHASE_FEATURE_DIM
+V31_FREQUENCY_HIDDEN_DIM = FREQUENCY_HIDDEN_DIM
+V31_FREQUENCY_DROPOUT = FREQUENCY_DROPOUT
+V31_FREQUENCY_LEARNING_RATE = FREQUENCY_LEARNING_RATE
+V31_SPATIAL_LEARNING_RATE = SPATIAL_LEARNING_RATE
 DEFAULT_RADIAL_BINS = 32
 MIN_RADIAL_BINS = 4
 V31_RADIAL_HIDDEN_DIM = 64
@@ -65,6 +63,7 @@ class RadialProfileExtractor(nn.Module):
     """Average normalized log-magnitude values in low-to-high radial bins."""
 
     def __init__(self, radial_bins: int = DEFAULT_RADIAL_BINS) -> None:
+        """Configure the number of low-to-high radial spectrum bins."""
         super().__init__()
         if isinstance(radial_bins, bool) or radial_bins < MIN_RADIAL_BINS:
             raise ValueError(f"radial_bins must be at least {MIN_RADIAL_BINS}.")
@@ -87,6 +86,7 @@ class RadialProfileExtractor(nn.Module):
         width: int,
         device: torch.device,
     ) -> tuple[torch.Tensor, torch.Tensor]:
+        """Return cached flattened bin indices and safe per-bin pixel counts."""
         key = self.cache_key(height, width, device)
         cached = self._bin_cache.get(key)
         if cached is not None:
@@ -116,6 +116,7 @@ class RadialProfileExtractor(nn.Module):
         return bin_indices, counts
 
     def forward(self, normalized_magnitude: torch.Tensor) -> torch.Tensor:
+        """Average each image's normalized magnitude within cached radial bins."""
         if normalized_magnitude.ndim != 4 or normalized_magnitude.shape[1] != 1:
             raise ValueError(
                 "Radial extraction expects magnitude shaped [batch, 1, height, width]."
@@ -160,6 +161,7 @@ class LearnedFrequencyResidualClassifier(nn.Module):
         branch_dropout: float = DEFAULT_FREQUENCY_BRANCH_DROPOUT,
         mask_probability: float = DEFAULT_FREQUENCY_MASK_PROB,
     ) -> None:
+        """Build spatial and three forensic heads with controlled residual fusion."""
         super().__init__()
         if not math.isfinite(frequency_scale) or frequency_scale < 0.0:
             raise ValueError("frequency_scale must be greater than or equal to 0.")
@@ -175,14 +177,14 @@ class LearnedFrequencyResidualClassifier(nn.Module):
         self.fft_preprocessor = SharedFFTPreprocessor()
         self.radial_extractor = RadialProfileExtractor(radial_bins)
         self.spatial_classifier = nn.Linear(spatial_dim, 1)
-        self.magnitude_branch = MagnitudeBranchV3(magnitude_dim, mask_probability)
-        self.phase_branch = PhaseBranchV3(phase_dim)
-        self.magnitude_head = _build_frequency_head(
+        self.magnitude_branch = MagnitudeBranch(magnitude_dim, mask_probability)
+        self.phase_branch = PhaseBranch(phase_dim)
+        self.magnitude_head = build_frequency_head(
             magnitude_dim,
             frequency_hidden_dim,
             frequency_dropout,
         )
-        self.phase_head = _build_frequency_head(
+        self.phase_head = build_frequency_head(
             phase_dim,
             frequency_hidden_dim,
             frequency_dropout,
@@ -204,6 +206,7 @@ class LearnedFrequencyResidualClassifier(nn.Module):
         spatial_features: torch.Tensor,
         raw_images: torch.Tensor,
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+        """Return spatial, magnitude, phase, and radial logits from one shared FFT."""
         spatial_logit = self.spatial_classifier(spatial_features)
         normalized_magnitude, phase = self.fft_preprocessor(raw_images)
 
@@ -224,6 +227,7 @@ class LearnedFrequencyResidualClassifier(nn.Module):
         phase_logit: torch.Tensor,
         radial_logit: torch.Tensor,
     ) -> torch.Tensor:
+        """Softmax-mix forensic logits and add the scaled residual to spatial output."""
         weights = self.normalized_frequency_weights()
         frequency_logit = (
             weights[0] * magnitude_logit
@@ -246,6 +250,7 @@ class LearnedFrequencyResidualClassifier(nn.Module):
         spatial_features: torch.Tensor,
         raw_images: torch.Tensor,
     ) -> torch.Tensor:
+        """Return one fused REAL-positive logit per image."""
         return self.combine_logits(*self.forward_components(spatial_features, raw_images))
 
 
@@ -270,6 +275,7 @@ class HybridV31AIGCDetector(nn.Module):
         frequency_branch_dropout: float = DEFAULT_FREQUENCY_BRANCH_DROPOUT,
         frequency_mask_probability: float = DEFAULT_FREQUENCY_MASK_PROB,
     ) -> None:
+        """Construct EfficientNet features and the final V3.1 classifier."""
         super().__init__()
         weights = models.EfficientNet_B0_Weights.DEFAULT if pretrained_spatial else None
         efficientnet = models.efficientnet_b0(weights=weights)
@@ -313,6 +319,7 @@ class HybridV31AIGCDetector(nn.Module):
         )
 
     def extract_spatial_features(self, images: torch.Tensor) -> torch.Tensor:
+        """Normalize raw RGB internally and produce pooled EfficientNet features."""
         normalized = (images - self.imagenet_mean) / self.imagenet_std
         return torch.flatten(self.avgpool(self.features(normalized)), 1)
 
@@ -320,6 +327,7 @@ class HybridV31AIGCDetector(nn.Module):
         self,
         images: torch.Tensor,
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+        """Return all branch logits while sharing the original input tensor."""
         spatial_features = self.extract_spatial_features(images)
         return self.classifier.forward_components(spatial_features, images)
 
@@ -339,6 +347,7 @@ class HybridV31AIGCDetector(nn.Module):
         }
 
     def forward(self, images: torch.Tensor) -> torch.Tensor:
+        """Return final logits shaped [batch,1] with P(REAL) sigmoid semantics."""
         return self.classifier.combine_logits(*self.forward_components(images))
 
 
@@ -350,9 +359,9 @@ def load_v31_spatial_checkpoint(
     """Strictly load all EfficientNet features and a compatible binary head."""
     path = Path(checkpoint_path)
     checkpoint = torch.load(path, map_location=device, weights_only=True)
-    state = _checkpoint_state_dict(checkpoint)
-    features = _validated_feature_state(model, state)
-    classifier_state, classifier_source = _validated_spatial_classifier_state(model, state)
+    state = checkpoint_state_dict(checkpoint)
+    features = validated_feature_state(model, state)
+    classifier_state, classifier_source = validated_spatial_classifier_state(model, state)
 
     model.features.load_state_dict(features, strict=True)
     if classifier_state is not None:

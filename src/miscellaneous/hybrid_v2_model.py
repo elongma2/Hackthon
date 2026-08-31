@@ -12,7 +12,7 @@ import torch.nn as nn
 import torchvision.models as models
 
 from .hybrid_model import FFTPreprocessor
-from .transforms import IMAGENET_MEAN, IMAGENET_STD
+from ..transforms import IMAGENET_MEAN, IMAGENET_STD
 
 
 HYBRID_V2_MODEL_TYPE = "hybrid_v2"

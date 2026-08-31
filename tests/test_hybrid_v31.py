@@ -124,7 +124,10 @@ class HybridV31ArchitectureTests(unittest.TestCase):
     def test_component_shapes_and_single_fft(self) -> None:
         images = torch.rand(2, 3, 64, 64)
         original_fft2 = torch.fft.fft2
-        with patch("src.hybrid_v3_model.torch.fft.fft2", wraps=original_fft2) as fft2:
+        with patch(
+            "src.frequency_features.torch.fft.fft2",
+            wraps=original_fft2,
+        ) as fft2:
             with torch.no_grad():
                 output, diagnostics = self.model.forward_with_branch_logits(images)
         self.assertEqual(fft2.call_count, 1)

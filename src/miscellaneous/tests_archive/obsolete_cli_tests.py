@@ -1,3 +1,5 @@
+"""Archived tests for superseded public CLI commands."""
+
 from __future__ import annotations
 
 import io

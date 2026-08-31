@@ -38,6 +38,7 @@ SUPPORTED_EXTENSIONS = frozenset(
 
 @dataclass(frozen=True)
 class ConditionSpec:
+    """Describe one canonical robustness condition and its display metadata."""
     condition_id: str
     transform: str
     parameter: str
@@ -73,6 +74,7 @@ DISTORTION_CONDITION_IDS = ROBUSTNESS_CONDITION_IDS[1:]
 
 @dataclass(frozen=True)
 class ImageRecord:
+    """Identify one labelled clean or distorted image by stable source ID."""
     path: Path
     source_id: str
     source_group_id: str | None
@@ -81,6 +83,7 @@ class ImageRecord:
 
 @dataclass(frozen=True)
 class ManifestRow:
+    """Store one parsed and resolved distortions.csv record."""
     row_number: int
     condition_id: str
     source_id: str
@@ -95,6 +98,7 @@ class ManifestRow:
 
 @dataclass
 class AuditResult:
+    """Contain audited condition records, counts, schema, and nonfatal warnings."""
     schema: str
     manifest_path: Path | None
     clean_records: list[ImageRecord]
@@ -106,6 +110,7 @@ class AuditResult:
     warnings: list[str]
 
     def serializable(self) -> dict[str, object]:
+        """Return JSON-safe audit metadata without heavyweight image records."""
         return {
             "schema": self.schema,
             "manifest_path": None if self.manifest_path is None else str(self.manifest_path),
@@ -126,6 +131,7 @@ def sanitize_run_name(run_name: str) -> str:
 
 
 def _number(parameters: Mapping[str, object], key: str) -> float:
+    """Read one finite numeric transform parameter from manifest JSON."""
     value = parameters.get(key)
     if isinstance(value, bool) or not isinstance(value, (int, float)):
         raise ValueError(f"manifest parameter {key!r} must be numeric")
@@ -136,6 +142,7 @@ def _number(parameters: Mapping[str, object], key: str) -> float:
 
 
 def _match_number(value: float, expected: Sequence[tuple[float, str]]) -> str:
+    """Map a numeric setting to exactly one supported canonical condition."""
     matches = [condition for number, condition in expected if math.isclose(value, number, abs_tol=1e-9)]
     if len(matches) != 1:
         raise ValueError(f"unsupported or ambiguous robustness parameter value {value!r}")
@@ -180,11 +187,13 @@ def map_manifest_condition(transform: str, parameters: Mapping[str, object]) -> 
 
 
 def _normalized_parts(path_text: str) -> tuple[str, ...]:
+    """Normalize copied Windows or POSIX manifest paths into portable parts."""
     normalized = path_text.strip().replace("\\", "/")
     return tuple(part for part in PurePosixPath(normalized).parts if part not in ("/", ""))
 
 
 def _clean_records(validation_dir: Path) -> tuple[list[ImageRecord], dict[str, ImageRecord]]:
+    """Discover clean FAKE/REAL images and build collision-safe source IDs."""
     validation_dir = validation_dir.resolve()
     if not validation_dir.is_dir():
         raise FileNotFoundError(f"Clean validation directory not found: {validation_dir}")
@@ -223,6 +232,7 @@ def _clean_records(validation_dir: Path) -> tuple[list[ImageRecord], dict[str, I
 
 
 def _stable_source_record(source: str, clean_lookup: Mapping[str, ImageRecord]) -> ImageRecord:
+    """Resolve a copied absolute manifest source by its relative class-path suffix."""
     parts = _normalized_parts(source)
     matches: dict[str, ImageRecord] = {}
     for index, part in enumerate(parts):
@@ -245,6 +255,7 @@ def _resolve_output_path(
     split: str | None,
     source_id: str,
 ) -> Path | None:
+    """Resolve a prepared file without trusting machine-specific absolute prefixes."""
     raw_path = Path(recorded_output)
     candidates: list[Path] = []
     if raw_path.is_file():
@@ -267,6 +278,7 @@ def _resolve_output_path(
 
 
 def _optional_int(row: Mapping[str, str], key: str, row_number: int) -> int | None:
+    """Parse an optional positive integer manifest field with row diagnostics."""
     text = (row.get(key) or "").strip()
     if not text:
         return None
@@ -286,6 +298,7 @@ def _iter_manifest_rows(manifest_path: Path) -> Iterable[dict[str, str]]:
 
 
 def _readable_image(path: Path) -> tuple[tuple[int, int], str | None]:
+    """Fully decode an image and return EXIF-corrected dimensions and format."""
     try:
         with Image.open(path) as image:
             image_format = image.format
@@ -361,6 +374,7 @@ def _check_condition_image(
     clean_size: tuple[int, int],
     warnings: list[str],
 ) -> None:
+    """Validate readability and generator-consistent dimensions/format with warnings."""
     if manifest_row.output_path is None:
         raise FileNotFoundError(
             f"Prepared output is missing for {condition_id}/{manifest_row.source_id}: "
@@ -633,13 +647,16 @@ class PreparedConditionDataset(Dataset):
     """Read one audited condition without changing its order or membership."""
 
     def __init__(self, records: Sequence[ImageRecord], transform) -> None:
+        """Store audited records and the model-aware deterministic transform."""
         self.records = tuple(records)
         self.transform = transform
 
     def __len__(self) -> int:
+        """Return the number of prepared images evaluated exactly once."""
         return len(self.records)
 
     def __getitem__(self, index: int):
+        """Load one prepared RGB image with its label and stable source ID."""
         record = self.records[index]
         with Image.open(record.path) as image:
             value = self.transform(image.convert("RGB"))
@@ -656,15 +673,18 @@ class LiveConditionDataset(Dataset):
         condition_id: str,
         seed: int,
     ) -> None:
+        """Configure one deterministic in-memory condition over clean records."""
         self.records = tuple(records)
         self.transform = transform
         self.condition_id = condition_id
         self.seed = seed
 
     def __len__(self) -> int:
+        """Return the unchanged number of clean source images."""
         return len(self.records)
 
     def __getitem__(self, index: int):
+        """Apply one condition transiently and return the transformed labelled image."""
         record = self.records[index]
         with Image.open(record.path) as opened:
             original = ImageOps.exif_transpose(opened).convert("RGB")
@@ -718,6 +738,7 @@ def calculate_robustness_metrics(
 
 
 def _with_deltas(metrics: dict[str, object], clean: Mapping[str, object]) -> dict[str, object]:
+    """Add raw metric differences against the clean baseline."""
     result = dict(metrics)
     delta_names = {
         "accuracy": "delta_accuracy",
@@ -732,14 +753,17 @@ def _with_deltas(metrics: dict[str, object], clean: Mapping[str, object]) -> dic
 
 
 def _format_percent(value: object) -> str:
+    """Format a fractional metric as a percentage."""
     return f"{float(value) * 100:.2f}%"
 
 
 def _format_delta(value: object) -> str:
+    """Format a raw fractional delta as signed percentage points."""
     return f"{float(value) * 100:+.2f} pp"
 
 
 def _table_rows(results: Mapping[str, Mapping[str, object]]) -> list[list[str]]:
+    """Create display rows in the official robustness-condition order."""
     rows: list[list[str]] = []
     for condition in CONDITIONS:
         metrics = results.get(condition.condition_id)
@@ -777,6 +801,7 @@ TABLE_HEADERS = [
 
 
 def _markdown_table(rows: Sequence[Sequence[str]]) -> str:
+    """Render robustness result rows as a compact Markdown table."""
     lines = [
         "| " + " | ".join(TABLE_HEADERS) + " |",
         "| " + " | ".join("---" for _ in TABLE_HEADERS) + " |",
@@ -791,6 +816,7 @@ def _write_outputs(
     results: Mapping[str, Mapping[str, object]],
     predictions: Mapping[str, Sequence[Mapping[str, object]]],
 ) -> None:
+    """Atomically create the run directory's JSON, CSV, Markdown, and predictions."""
     output_dir.mkdir(parents=True, exist_ok=False)
     (output_dir / "robustness_summary.json").write_text(
         json.dumps(summary, indent=2), encoding="utf-8"

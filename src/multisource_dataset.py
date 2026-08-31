@@ -31,6 +31,7 @@ LEGACY_SOURCE_DISPLAY_NAMES = {
 
 @dataclass(frozen=True)
 class ImageSource:
+    """Define one recursively scanned root with an explicit source name and label."""
     name: str
     root: Path
     label: int
@@ -297,6 +298,7 @@ def build_multisource_sources(
     real_sources = [source for source in wildfake_sources if source.label == REAL_LABEL]
 
     def display_name(source: WildFakeSource) -> str:
+        """Use a stable human-readable label while retaining arbitrary sources."""
         return LEGACY_SOURCE_DISPLAY_NAMES.get(source.name.casefold(), source.name)
 
     training_sources = [

@@ -10,13 +10,13 @@ import torch
 import torch.nn as nn
 import torchvision.models as models
 
-from .hybrid_model import HYBRID_MODEL_TYPE, HybridAIGCDetector
-from .hybrid_v2_model import (
+from .miscellaneous.hybrid_model import HYBRID_MODEL_TYPE, HybridAIGCDetector
+from .miscellaneous.hybrid_v2_model import (
     HYBRID_V2_MODEL_TYPE,
     V2_SPATIAL_FEATURE_DIM,
     HybridV2AIGCDetector,
 )
-from .hybrid_v3_model import (
+from .miscellaneous.hybrid_v3_model import (
     HYBRID_V3_MODEL_TYPE,
     V3_SPATIAL_FEATURE_DIM,
     HybridV3AIGCDetector,
@@ -51,6 +51,7 @@ def _required_checkpoint_number(
     key: str,
     model_name: str = "Hybrid V2",
 ) -> float:
+    """Read one finite numeric architecture field required for strict loading."""
     value = checkpoint.get(key)
     if isinstance(value, bool) or not isinstance(value, (int, float)):
         raise ValueError(f"{model_name} checkpoint requires numeric metadata {key!r}.")

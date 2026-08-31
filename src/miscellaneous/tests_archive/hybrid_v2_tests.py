@@ -13,7 +13,7 @@ import torch
 import torch.nn as nn
 
 import main as app
-from src.hybrid_v2_model import (
+from src.miscellaneous.hybrid_v2_model import (
     HYBRID_V2_MODEL_TYPE,
     V2_FREQUENCY_FEATURE_DIM,
     V2_FREQUENCY_HIDDEN_DIM,

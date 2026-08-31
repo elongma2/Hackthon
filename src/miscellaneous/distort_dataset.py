@@ -1,4 +1,4 @@
-#distort_dataset.py
+# Archived random-distortion experiment.
 """Create controlled image distortions while preserving ImageFolder labels.
 
 Example:

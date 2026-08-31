@@ -10,7 +10,6 @@ wheels/
 dataset/
 datasets/
 data/
-checkpoints/
 
 # Python junk
 __pycache__/

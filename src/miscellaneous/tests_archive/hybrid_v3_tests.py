@@ -11,8 +11,8 @@ from unittest.mock import Mock, patch
 import torch
 
 import main as app
-from src.hybrid_v2_model import HYBRID_V2_MODEL_TYPE, HybridV2AIGCDetector
-from src.hybrid_v3_model import (
+from src.miscellaneous.hybrid_v2_model import HYBRID_V2_MODEL_TYPE, HybridV2AIGCDetector
+from src.miscellaneous.hybrid_v3_model import (
     HYBRID_V3_MODEL_TYPE,
     V3_MAGNITUDE_FEATURE_DIM,
     V3_PHASE_FEATURE_DIM,

@@ -138,6 +138,7 @@ def distort_folder(
 
 
 def main() -> None:
+    """Parse folder-distortion arguments and generate the requested manifest."""
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--input", type=Path, default=Path("data/input"))
     parser.add_argument("--output", type=Path, default=Path("data/output"))

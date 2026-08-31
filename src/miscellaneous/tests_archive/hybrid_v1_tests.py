@@ -15,7 +15,7 @@ from torch.utils.data import DataLoader
 
 import main as app
 from src.bytedance_validation import run_bytedance_validation
-from src.hybrid_model import (
+from src.miscellaneous.hybrid_model import (
     FREQUENCY_FEATURE_DIM,
     HYBRID_MODEL_TYPE,
     SPATIAL_FEATURE_DIM,

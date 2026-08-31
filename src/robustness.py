@@ -30,6 +30,7 @@ def _test_transforms(
     normalize = transforms.Normalize(mean=IMAGENET_MEAN, std=IMAGENET_STD)
 
     def finish(steps: list) -> transforms.Compose:
+        """Append external ImageNet normalization only for spatial-only models."""
         if normalize_inputs:
             steps.append(normalize)
         return transforms.Compose(steps)

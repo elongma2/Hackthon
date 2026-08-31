@@ -9,7 +9,7 @@ import torch
 import torch.nn as nn
 import torchvision.models as models
 
-from .transforms import IMAGENET_MEAN, IMAGENET_STD
+from ..transforms import IMAGENET_MEAN, IMAGENET_STD
 
 
 HYBRID_MODEL_TYPE = "hybrid"

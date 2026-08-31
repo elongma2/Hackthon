@@ -17,7 +17,7 @@ from torch.utils.data import DataLoader, TensorDataset
 import main as app
 from src.multisource_dataset import FAKE_LABEL, REAL_LABEL, ImageSource
 from src.train import train_one_epoch
-from src.train_deeper import (
+from src.miscellaneous.train_deeper import (
     DEFAULT_CLASSIFIER_LR,
     DEFAULT_LATE_BLOCKS_LR,
     DEFAULT_MIDDLE_BLOCKS_LR,

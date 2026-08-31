@@ -10,7 +10,7 @@ Install:
     uv add pillow numpy
 
 Run from the project root:
-    uv run python -m src.distort_dataset \
+    uv run python -m src.distort_dataset2 \
         --input data/raw --output data/distorted --splits train test --seed 42
 
 Split original source images before running this program. Do not let variants
@@ -43,6 +43,7 @@ CROP_FRACTION = 0.8
 
 @dataclass(frozen=True)
 class Variant:
+    """Hold one transformed image and the manifest metadata needed to save it."""
     transform: str
     tag: str
     parameters: dict[str, Any]
@@ -52,10 +53,12 @@ class Variant:
 
 
 def _tag_number(value: float) -> str:
+    """Encode a decimal value in a filesystem-safe transform tag."""
     return str(value).replace(".", "p")
 
 
 def _resize_down_then_up(image: Image.Image, scale: float) -> Image.Image:
+    """Downscale an image and restore its original dimensions with Lanczos."""
     width, height = image.size
     small_size = (max(1, round(width * scale)), max(1, round(height * scale)))
     small = image.resize(small_size, Image.Resampling.LANCZOS)
@@ -65,6 +68,7 @@ def _resize_down_then_up(image: Image.Image, scale: float) -> Image.Image:
 def _gaussian_noise(
     image: Image.Image, sigma: float, seed: int
 ) -> Image.Image:
+    """Add deterministic Gaussian RGB noise in the normalized [0,1] range."""
     rng = np.random.default_rng(seed)
     pixels = np.asarray(image, dtype=np.float32) / 255.0
     noise = rng.normal(loc=0.0, scale=sigma, size=pixels.shape)
@@ -83,11 +87,13 @@ def _center_crop(image: Image.Image, fraction: float) -> Image.Image:
 
 
 def _stable_seed(global_seed: int, source_key: str, transform_tag: str) -> int:
+    """Derive a repeatable per-image, per-transform random seed."""
     value = f"{global_seed}\0{source_key}\0{transform_tag}".encode("utf-8")
     return int.from_bytes(hashlib.sha256(value).digest()[:8], "big")
 
 
 def _source_group_id(source_key: str) -> str:
+    """Create a compact stable identifier for all variants of one source image."""
     return hashlib.sha256(source_key.encode("utf-8")).hexdigest()[:16]
 
 
@@ -164,11 +170,13 @@ def required_variants(
 
 
 def _output_name(source: Path, variant: Variant) -> str:
+    """Build a collision-resistant output name including source format and tag."""
     source_extension = source.suffix.lower().lstrip(".") or "none"
     return f"{source.stem}__src_{source_extension}__{variant.tag}{variant.suffix}"
 
 
 def _save_variant(variant: Variant, destination: Path) -> None:
+    """Save JPEG variants with requested quality and all others as PNG."""
     destination.parent.mkdir(parents=True, exist_ok=True)
     if variant.jpeg_quality is not None:
         variant.image.save(
@@ -183,6 +191,7 @@ def _save_variant(variant: Variant, destination: Path) -> None:
 
 
 def _class_names(split_root: Path) -> list[str]:
+    """Return unambiguous class directory names for one labelled split."""
     names = sorted(path.name for path in split_root.iterdir() if path.is_dir())
     folded: dict[str, str] = {}
     for name in names:
@@ -204,6 +213,7 @@ def generate(
     include_original: bool,
     overwrite: bool,
 ) -> tuple[int, int]:
+    """Generate official robustness variants and a manifest for labelled splits."""
     input_root = input_root.resolve()
     output_root = output_root.resolve()
     if not input_root.is_dir():
@@ -324,6 +334,7 @@ def generate(
 
 
 def main() -> None:
+    """Parse generation arguments and report created images and failures."""
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument(
         "--input", type=Path, required=True, help="Root containing split folders"

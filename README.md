@@ -1,442 +1,206 @@
-# TikTok TechJam — CIFAKE Detector
+# Robust AI-Generated Image Detection
 
-This project fine-tunes EfficientNet-B0 to distinguish real images from AI-generated images using the CIFAKE dataset. It includes training, evaluation, robustness testing, checkpointing, and single-image prediction.
+This ByteDance/TikTok TechJam Track 5 solution trains a source-balanced
+EfficientNet-B0 and then Hybrid V3.1, which adds lightweight Fourier magnitude,
+phase, and radial-frequency evidence.
 
-## Setup
+The project uses `FAKE = 0`, `REAL = 1`, `sigmoid(logit) = P(REAL)`, and
+`P(AIGC) = 1 - P(REAL)`.
+
+## Quick Start: Run on Your Own Images
+
+Put arbitrary images in an unlabeled folder; nested folders are supported.
+Checkpoints trained by the team are already provided and can be immediately be use for predicting images.
+Alternatively, you can try replicating the checkpoints by downloading and training on the image folders the team
+has used.
 
 ```powershell
-python -m pip install -r requirements.txt
+uv run --no-sync python main.py predict --input-dir .\my_images --checkpoint .\checkpoints\hybrid_v31_midjourney_50k_7epoch_all_sources_best.pt --output .\predictions.json
 ```
 
-The dataset and pretrained model weights are downloaded automatically on first use.
+`pred` near `1.0` means more likely AI-generated; `pred` near `0.0` means more
+likely real. No threshold is applied.
+
+## Installation
+
+Python 3.12 is required. Install [Astral uv](https://docs.astral.sh/uv/getting-started/installation/).
+
+Windows PowerShell:
+
+```powershell
+powershell -ExecutionPolicy ByPass -c "irm https://astral.sh/uv/install.ps1 | iex"
+```
+
+macOS/Linux:
+
+```bash
+curl -LsSf https://astral.sh/uv/install.sh | sh
+```
+
+Then install the verified environment:
+
+```powershell
+uv sync
+uv pip install -r requirements.txt
+```
+
+Use `uv run --no-sync` below so uv retains packages installed from the
+requirements file.
+
+## Final Architecture
+
+```text
+RGB image [0,1]
+├── EfficientNet-B0 spatial features → spatial logit
+└── one float32 luminance FFT
+    ├── normalized log-magnitude → magnitude logit
+    ├── sin/cos phase → phase logit
+    └── radial-frequency profile → radial logit
+             ↓
+      learned softmax frequency fusion
+             ↓
+final = spatial logit + fixed frequency scale × frequency residual
+```
+
+The same augmented tensor reaches every branch. The FFT runs once in float32.
+The final model is `src/hybrid_v31_model.py`.
 
 ## Dataset Setup
 
-CIFAKE continues to use the existing automatic setup. WildFake-style datasets
-are downloaded manually because the image archives are too large for Git.
+### CIFAKE
 
-1. Extract each source directly under the label it belongs to. Any source name
-   and any amount of nesting inside it are supported:
+CIFAKE is downloaded automatically through KaggleHub using
+`birdy654/cifake-real-and-ai-generated-synthetic-images`. Existing files are
+reused. No manual arrangement is normally required.
+
+```text
+data/raw/cifake/
+├── train/{FAKE,REAL}/
+└── test/{FAKE,REAL}/
+```
+
+### WildFake
+
+WildFake is too large for Git. To reproduce the final source mix, manually obtain
+only these ModelScope folders:
+
+```text
+Diffusion_based/ADM/
+Diffusion_based/DALLE2/
+Diffusion_based/DDPM/
+Diffusion_based/Midjourney/part_4/
+Real/coco/
+Real/laion5b/
+```
+
+Copy them into:
 
 ```text
 data/raw/WildFake/
 ├── FAKE/
 │   ├── ADM/
+│   ├── DALLE2/
 │   ├── DDPM/
-│   └── Midjourney/
+│   └── part_4/        # Midjourney subset used in final training
 └── REAL/
-    ├── cocofolder/
-    ├── laion5b/
-    └── Flickr/
+    ├── coco/
+    └── laion5b/
 ```
 
-2. Prepare every source with a deterministic 90/10 split:
+Keep official `TRAIN` and `TEST` folders. Do not remove TEST images: training
+reads TRAIN while validation reads TEST. Nested folders may remain unchanged.
+
+## Prepare WildFake
 
 ```powershell
-python main.py prepare-data
+uv run --no-sync python main.py prepare-data --data-dir data/raw --wildfake-dir data/raw/WildFake
 ```
 
-Nested extracted folders are preserved. A source that already has a clear
-official `TRAIN`/`TEST` split keeps its membership; an unsafe partial or
-ambiguous layout is left untouched with a warning. Customize the split with:
-
-```powershell
-python main.py prepare-data --train-ratio 0.9 --seed 42
-```
-
-3. Run the existing training commands. Prepared sources are discovered
-automatically by both multisource and source-balanced training, so adding a new
-source does not require a Python change.
-
-## Commands
-
-Train the model, save the best checkpoint, and run the robustness benchmark:
-
-```powershell
-python main.py train
-```
-
-Train the staged EfficientNet-B0 experiment:
-
-```powershell
-python main.py train-staged
-```
-
-Staged training freezes the full feature extractor for two head-only epochs at
-`1e-3`, then unfreezes feature blocks 6–8 for five epochs by default. During
-Stage 2, the classifier uses `1e-4`, the unfrozen backbone uses `1e-5`, and both
-learning rates follow cosine annealing. Change only the Stage 2 duration with
-`--stage2-epochs`.
-
-Train the same staged workflow with combined CIFAKE and WildFake sources:
-
-```powershell
-python main.py train-multisource
-```
-
-The multisource command recursively loads `data/raw/cifake` and every prepared
-source under `data/raw/WildFake` with explicit `FAKE=0` and `REAL=1` labels.
-Training is shuffled across sources; internal validation is not shuffled. Its best
-checkpoint is saved to
-`checkpoints/efficientnet_staged_multisource_best.pt`, then that exact
-checkpoint is evaluated with the ByteDance validation workflow.
-
-Select a deterministic fraction from each training source independently:
-
-```powershell
-python main.py train-multisource --train-fraction 0.5
-```
-
-Sampling uses seed 42 and only changes the file paths included in training.
-Internal and ByteDance validation always use their complete datasets. The
-default fraction is `1.0`.
-
-### Source-balanced held-out-generator training
-
-Train the final source-balanced model using CIFAKE plus every prepared WildFake
-FAKE and REAL source:
-
-```powershell
-python main.py train-source-balanced
-```
-
-This uses the fixed source-balanced epoch length and selects
-`checkpoints/efficientnet_balanced_all_sources_best.pt` using pooled internal
-validation ROC-AUC. Add `--samples-per-epoch` or `--seed` as needed.
-
-For diagnostic unseen-generator experiments, provide an optional holdout.
-
-Train while completely excluding DDPM from training and using DDPM TEST as the
-unseen FAKE validation source:
-
-```powershell
-python main.py train-source-balanced --holdout DDPM
-```
-
-Run the corresponding experiment with ADM held out instead:
-
-```powershell
-python main.py train-source-balanced --holdout ADM
-```
-
-Any prepared WildFake FAKE source can be held out, matched case-insensitively:
-
-```powershell
-python main.py train-source-balanced --holdout Midjourney
-```
-
-This workflow keeps the existing two-stage EfficientNet training strategy but
-replaces ordinary random sampling with source-balanced batches. Each batch is
-approximately half FAKE and half REAL, and the active sources within each class
-contribute approximately equally. Smaller sources can be reused; no image files
-are copied, moved, or changed.
-
-Each epoch uses a fixed 100,000 training samples by default. Change the epoch
-size or deterministic sampler seed with:
-
-```powershell
-python main.py train-source-balanced --holdout DDPM `
-    --samples-per-epoch 100000 `
-    --seed 42
-```
-
-The validation set contains only the held-out FAKE generator plus the complete
-CIFAKE REAL test source and every prepared WildFake REAL test source.
-Checkpoints are selected using the held-out generator's FAKE-positive ROC-AUC
-against those combined REAL images, not pooled source-matched validation AUC.
-Per-source recall is printed after every epoch.
-
-The default checkpoints are:
-
-- `checkpoints/efficientnet_balanced_holdout_ddpm_best.pt`
-- `checkpoints/efficientnet_balanced_holdout_adm_best.pt`
-- `checkpoints/efficientnet_balanced_all_sources_best.pt`
-
-Future holdouts use the same lowercase naming convention, for example
-`checkpoints/efficientnet_balanced_holdout_midjourney_best.pt`. Use
-`--checkpoint` to override it.
-
-This command deliberately does not run robustness or ByteDance validation.
-After selecting an approach using held-out validation, run ByteDance manually:
-
-```powershell
-python main.py validate-bytedance `
-    --checkpoint checkpoints/efficientnet_balanced_holdout_ddpm_best.pt
-```
-
-### Progressive deeper EfficientNet fine-tuning
-
-Run the additive three-stage EfficientNet-B0 experiment with one FAKE source
-reserved for held-out-generator validation:
-
-```powershell
-python main.py train-efficientnet-deeper `
-    --data-dir data/raw/cifake `
-    --wildfake-dir data/raw/WildFake `
-    --holdout-fake-source ddpm `
-    --samples-per-epoch 100000 `
-    --batch-size 32 `
-    --stage1-epochs 2 `
-    --stage2-epochs 2 `
-    --stage3-epochs 3 `
-    --seed 42 `
-    --run-name ddpm_progressive
-```
-
-The same ImageNet-pretrained EfficientNet-B0 continues through all stages:
-
-- Stage 1 trains only the classifier at `1e-4`.
-- Stage 2 adds blocks 6-8 at `1e-5` and starts a stage-local cosine schedule.
-- Stage 3 adds blocks 4-5 at `3e-6`, restores all configured base rates, and
-  starts a fresh cosine schedule.
-
-AdamW state remains continuous for parameters already being trained. Frozen
-blocks stay in evaluation mode so their BatchNorm statistics cannot drift. The
-folder named `TEST` for the excluded generator is used as held-out-generator
-validation during checkpoint selection; it is not described as an untouched
-final test set.
-
-The command creates
-`checkpoints/efficientnet_deeper_ddpm_progressive_best.pt`. It refuses any
-existing automatic or explicit output path, never reads an older trained
-checkpoint, and writes its copied best state exactly once after the run.
-
-### Hybrid spatial-frequency model
-
-The optional hybrid detector keeps EfficientNet-B0 as a 1,280-dimensional
-spatial branch and adds a lightweight FFT branch. The same robustness-augmented
-RGB tensor feeds both branches: EfficientNet applies ImageNet normalization
-internally, while the frequency branch computes a float32 luminance FFT,
-log-magnitude spectrum, and a small CNN with 256 output features. Their
-concatenated features pass through a 256-unit fusion MLP and one output logit.
-Labels and probabilities are unchanged: `FAKE=0`, `REAL=1`, and
-`sigmoid(logit)=P(REAL)`.
-
-Train the hybrid on CIFAKE plus every prepared WildFake source with the existing
-source-balanced sampler:
-
-```powershell
-python main.py train-hybrid `
-    --spatial-checkpoint checkpoints/efficientnet_balanced_all_sources_best.pt `
-    --samples-per-epoch 100000 `
-    --stage1-epochs 2 `
-    --stage2-epochs 5
-```
-
-The spatial checkpoint is loaded strictly into every EfficientNet feature
-entry; incompatible or partial checkpoints fail with a clear diagnostic. If
-`--spatial-checkpoint` is omitted, the spatial branch starts from ImageNet
-weights. Stage 1 freezes EfficientNet and trains FFT plus fusion at `1e-4`.
-Stage 2 unfreezes EfficientNet blocks 6–8 at `1e-5` while FFT plus fusion
-continue at `1e-4`. FFT preprocessing always runs in float32, including inside
-an autocast context.
-
-Arbitrary prepared FAKE sources can also be held out without changing the
-sampler or data layout:
-
-```powershell
-python main.py train-hybrid --holdout Midjourney `
-    --spatial-checkpoint checkpoints/efficientnet_balanced_all_sources_best.pt
-```
-
-The default hybrid checkpoints are
-`checkpoints/hybrid_balanced_all_sources_best.pt` and
-`checkpoints/hybrid_balanced_holdout_<source>_best.pt`. Prediction, evaluation,
-robustness, and ByteDance validation recognize hybrid checkpoint metadata and
-select the matching raw-input transform automatically.
-
-### Hybrid V2: controlled FFT residual
-
-Hybrid V1 concatenates 1,280 EfficientNet features with 256 FFT features and
-learns a fusion MLP. Hybrid V2 instead keeps the spatial detector as the main
-decision path and adds a smaller 128-feature FFT prediction as a controlled
-correction:
+This recursively scans every source, preserves a valid existing TRAIN/TEST
+split, and otherwise creates the deterministic project split. The result is:
 
 ```text
-final_logit = spatial_logit + frequency_scale * frequency_logit
+data/raw/WildFake/
+├── FAKE/{ADM,DALLE2,DDPM,part_4}/{TRAIN,TEST}/...
+└── REAL/{coco,laion5b}/{TRAIN,TEST}/...
 ```
 
-The default `frequency_scale` is `0.25`. Training-only frequency branch dropout
-defaults to `0.20`, so some samples must be classified from the spatial path
-alone. Optional spectrum masking is available but disabled by default. These
-constraints are intended to reduce dependence on generator-specific frequency
-cues; improved ByteDance performance must be confirmed experimentally.
+Training combines FAKE sources CIFAKE, ADM, DALLE2, DDPM, and Midjourney
+`part_4`, plus REAL sources CIFAKE, COCO, and LAION-5B. Sampling stays roughly
+50/50 FAKE/REAL and roughly uniform across sources within each class.
 
-Run a short source-balanced V2 experiment from the trained EfficientNet:
+## Train From Scratch
+
+### Train EfficientNet-B0
+
+The final spatial trainer is `src/train.py`. This command uses the successful
+50,000-samples-per-epoch, two-stage (2+5 epoch) recipe:
 
 ```powershell
-python main.py train-hybrid-v2 --data-dir data/raw/cifake --wildfake-dir data/raw/WildFake --spatial-checkpoint checkpoints/efficientnet_balanced_all_sources_best.pt --samples-per-epoch 5000 --stage1-epochs 1 --stage2-epochs 2 --frequency-scale 0.25 --frequency-branch-dropout 0.20 --frequency-mask-prob 0.0 --run-name smoke_alpha025
+uv run --no-sync python main.py train-source-balanced --data-dir data/raw --wildfake-dir data/raw/WildFake --samples-per-epoch 50000 --stage2-epochs 5 --batch-size 32 --seed 42 --checkpoint checkpoints/efficientnet_balanced_all_sources_50k_7epochs_best.pt
 ```
 
-For a longer experiment, use 25,000 samples, two Stage 1 epochs, and five Stage
-2 epochs. Automatically named V2 checkpoints refuse to overwrite an existing
-file; choose a new `--run-name`, or use an explicit `--checkpoint` when an
-overwrite is intentional. Examples:
+### Train Hybrid V3.1
+
+```powershell
+uv run --no-sync python main.py train-hybrid-v31 --data-dir data/raw --wildfake-dir data/raw/WildFake --spatial-checkpoint checkpoints/efficientnet_balanced_all_sources_50k_7epochs_best.pt --samples-per-epoch 50000 --stage1-epochs 2 --stage2-epochs 5 --frequency-scale 0.25 --frequency-branch-dropout 0.20 --frequency-mask-prob 0.0 --radial-bins 32 --batch-size 32 --seed 42 --run-name midjourney_50k_7epoch
+```
+
+Expected output:
 
 ```text
-checkpoints/hybrid_v2_balanced_all_sources_best.pt
-checkpoints/hybrid_v2_alpha025_all_sources_best.pt
-checkpoints/hybrid_v2_alpha025_holdout_ddpm_best.pt
+checkpoints/hybrid_v31_midjourney_50k_7epoch_all_sources_best.pt
 ```
 
-EfficientNet, Hybrid V1, and Hybrid V2 checkpoints remain independently
-loadable by prediction, evaluation, robustness, and ByteDance validation.
+Automatic V3.1 paths refuse to overwrite an existing checkpoint.
 
-### Hybrid V3: magnitude and phase residual
+## Evaluation
 
-Hybrid V3 keeps the V2 spatial prediction as the primary decision and derives
-two small forensic corrections from one shared float32 luminance FFT. The
-magnitude path models normalized frequency energy, while the phase path uses
-bounded sine/cosine channels to avoid the `-pi`/`+pi` angle discontinuity:
-
-```text
-final_logit = spatial_logit + frequency_scale * (
-    normalized_magnitude_weight * magnitude_logit
-    + normalized_phase_weight * phase_logit
-)
-```
-
-The supplied magnitude and phase weights are normalized to sum to one, so the
-default `0.5/0.5` mixture keeps the total residual scale at `0.25` rather than
-doubling it. Combined branch dropout remains `0.20`; optional masking affects
-only magnitude and remains disabled by default. V3 reuses the prepared dataset,
-source-balanced sampler, robustness augmentation, staged trainer, and existing
-evaluation commands. Performance must be established experimentally.
-
-Run a phase-only smoke experiment:
+ByteDance validation is optional evaluation data, never training data:
 
 ```powershell
-python main.py train-hybrid-v3 --data-dir data/raw/cifake --wildfake-dir data/raw/WildFake --spatial-checkpoint checkpoints/efficientnet_balanced_all_sources_best.pt --samples-per-epoch 5000 --stage1-epochs 1 --stage2-epochs 2 --frequency-scale 0.25 --magnitude-weight 0 --phase-weight 1 --frequency-branch-dropout 0.20 --frequency-mask-prob 0.0 --batch-size 32 --seed 42 --run-name phase_only_smoke
+uv run --no-sync python main.py validate-bytedance --checkpoint checkpoints/hybrid_v31_midjourney_50k_7epoch_all_sources_best.pt --validation-dir validation --data-dir data/raw --batch-size 32
 ```
 
-Run a 50/50 magnitude-plus-phase smoke experiment:
+Optional robustness matrix:
 
 ```powershell
-python main.py train-hybrid-v3 --data-dir data/raw/cifake --wildfake-dir data/raw/WildFake --spatial-checkpoint checkpoints/efficientnet_balanced_all_sources_best.pt --samples-per-epoch 5000 --stage1-epochs 1 --stage2-epochs 2 --frequency-scale 0.25 --magnitude-weight 1 --phase-weight 1 --frequency-branch-dropout 0.20 --frequency-mask-prob 0.0 --batch-size 32 --seed 42 --run-name dual_spectrum_smoke
+uv run --no-sync python main.py robustness-matrix --checkpoint checkpoints/hybrid_v31_midjourney_50k_7epoch_all_sources_best.pt --validation-dir validation --batch-size 32 --run-name final_v31
 ```
 
-Alternatively, `--v2-checkpoint PATH` strictly warm-starts the spatial and
-magnitude paths from a complete Hybrid V2 checkpoint while initializing phase
-randomly. It cannot be combined with `--spatial-checkpoint`. Automatically
-named V3 checkpoints use `checkpoints/hybrid_v3_<run>_all_sources_best.pt` (or
-the corresponding holdout name) and refuse accidental overwrites. V3
-checkpoints are supported by prediction, evaluation, robustness, and ByteDance
-validation through the existing model-aware loader.
+## Prediction JSON Format
 
-### Hybrid V3.1: radial frequency and learned fusion
-
-Hybrid V3.1 keeps V3 unchanged and adds a 32-bin radial profile that summarizes
-how normalized log-magnitude energy changes from low to high spatial
-frequencies. Magnitude, phase, and radial representations all come from one
-shared float32 FFT. A small radial MLP produces a third frequency logit, and
-three learned scalar parameters are normalized with softmax:
-
-```text
-frequency_logit =
-    w_magnitude * magnitude_logit
-    + w_phase * phase_logit
-    + w_radial * radial_logit
-
-final_logit = spatial_logit + frequency_scale * frequency_logit
+```json
+[
+  {"image_path": "picture1.jpg", "pred": 0.923481},
+  {"image_path": "nested/picture3.webp", "pred": 0.071928}
+]
 ```
+Every supported image produces one record in deterministic order. `pred` is a
+numeric AIGC confidence in `[0, 1]`.
 
-The weights start at one third each and always remain nonnegative with a sum of
-one. The overall frequency scale remains fixed at `0.25` by default. After each
-validation epoch, training reports the learned weights and the mean absolute
-spatial, magnitude, phase, and radial logits from the same validation forward.
-These values are diagnostic only and do not alter predictions.
+## Limitations and future improvements
+Our main limitation is that the model’s ability to generalize to unseen AI generators still depends heavily on the diversity of generators represented in the training data. Real-world transformations such as compression, resizing, and blur can also weaken the spatial and frequency-domain artifacts that the model relies on. Although source-balanced sampling reduces dataset bias, the model may still learn source-specific shortcuts. Given more time, we would expand the training set with a wider range of AI generators, strengthen transformation-based augmentation, and conduct more extensive held-out-generator testing to improve and verify generalization to completely unseen AI-generated images.
 
-Run a smoke experiment:
-
-```powershell
-python main.py train-hybrid-v31 --data-dir data/raw/cifake --wildfake-dir data/raw/WildFake --spatial-checkpoint checkpoints/efficientnet_balanced_all_sources_best.pt --samples-per-epoch 10000 --stage1-epochs 1 --stage2-epochs 2 --frequency-scale 0.25 --frequency-branch-dropout 0.20 --frequency-mask-prob 0.0 --radial-bins 32 --batch-size 32 --seed 42 --run-name radial32_smoke
-```
-
-For the full comparison, use `--samples-per-epoch 100000`,
-`--stage1-epochs 2`, `--stage2-epochs 5`, and a new run name. Automatically
-named V3.1 checkpoints refuse accidental overwrites. V3.1 is experimental; no
-performance improvement is assumed until it is measured.
-
-Evaluate the saved model:
-
-```powershell
-python main.py evaluate
-```
-
-Evaluate the staged checkpoint explicitly:
-
-```powershell
-python main.py evaluate --checkpoint checkpoints/efficientnet_staged_best.pt
-```
-
-Evaluate an existing checkpoint on the external ByteDance validation set:
-
-```powershell
-python main.py validate-bytedance
-```
-
-The command reads the CIFAKE and ByteDance ImageFolder class mappings, reports
-dataset counts, and calculates ROC-AUC with FAKE/AIGC as the positive class. It
-uses `validation/` and `checkpoints/efficientnet_staged_best.pt` by default.
-Compare another compatible checkpoint without retraining:
-
-```powershell
-python main.py validate-bytedance --checkpoint checkpoints/best_model.pt
-```
-
-Run only the robustness benchmark:
-
-```powershell
-python main.py robustness
-```
-
-Evaluate a checkpoint against the clean ByteDance validation set and apply all
-19 conditions deterministically in memory. No distorted image files are saved:
-
-```powershell
-python main.py robustness-matrix --checkpoint checkpoints/model.pt --validation-dir validation --probability-threshold 0.63 --batch-size 32 --run-name final_v31
-```
-
-The command uses the same clean images, checkpoint, preprocessing, and fixed
-threshold for every condition. To run clean plus one condition:
-
-```powershell
-python main.py robustness-matrix --checkpoint checkpoints/model.pt --validation-dir validation --probability-threshold 0.63 --batch-size 32 --run-name jpeg30_check --only jpeg_30
-```
-
-Existing prepared files remain supported by explicitly adding
-`--distorted-dir validation_distorted`; that mode requires its
-`distortions.csv` manifest and performs the full manifest audit.
-
-Classify one image:
-
-```powershell
-python main.py predict --image path\to\image.jpg
-```
-
-For a faster CPU experiment, reduce the image size, epochs, and worker count:
-
-```powershell
-python main.py train --image-size 64 --epochs 1 --num-workers 0
-```
-
-## Outputs
-
-- `data/raw/` contains the downloaded dataset.
-- `checkpoints/best_model.pt` contains the baseline checkpoint selected by validation accuracy.
-- `checkpoints/efficientnet_staged_best.pt` contains the staged checkpoint selected by validation ROC-AUC.
-- `checkpoints/efficientnet_staged_multisource_best.pt` contains the staged CIFAKE + WildFake checkpoint.
-- `checkpoints/efficientnet_balanced_holdout_ddpm_best.pt` contains the best DDPM-held-out experiment.
-- `checkpoints/efficientnet_balanced_holdout_adm_best.pt` contains the best ADM-held-out experiment.
-- `checkpoints/efficientnet_balanced_all_sources_best.pt` contains the all-source-balanced model.
-- `checkpoints/hybrid_balanced_all_sources_best.pt` contains the all-source hybrid model.
-- `checkpoints/hybrid_balanced_holdout_<source>_best.pt` contains a hybrid held-out experiment.
-- `checkpoints/hybrid_v2_balanced_all_sources_best.pt` contains the default Hybrid V2 experiment.
-- `checkpoints/hybrid_v2_<run>_all_sources_best.pt` contains a named Hybrid V2 experiment.
-- `checkpoints/hybrid_v3_<run>_all_sources_best.pt` contains a named Hybrid V3 experiment.
-- `checkpoints/hybrid_v31_<run>_all_sources_best.pt` contains a named Hybrid V3.1 experiment.
-- `results/robustness.json` contains robustness metrics.
-- `results/robustness/<run>/` contains manifest-audited matrix summaries and
-  per-image predictions for a named robustness run.
-
-Run `python main.py --help` to see all options.
+## Team Contributions
+Team member contributions
+1. Weng Jia Lin
+      Developed the initial baseline code and fine-tuning pipeline, and contributed to the model’s training and refinement throughout the project.
+      Identified the issue with the model’s probability threshold and prediction bias, and introduced dataset shuffling to improve the training process.
+Do DevPost write-up.
+2. Men Xuanmo
+      Contributed to brainstorming the code implementation throughout the development process.
+      Attended the relevant technical workshop and documented key insights and notes for the team.
+      Contributed to the video production, including preparation and editing of the project presentation.
+3. Goh Joshua
+      Identified the limitation of relying on only a single dataset and helped drive the move toward a more diverse training setup.
+      Contributed to model fine-tuning and experimentation.
+      Introduced the hybrid model approach and contributed to the development of robustness evaluation metrics.
+4. William Edward Sugiharto
+      Contributed to brainstorming and developing the code architecture and implementation strategy.
+      Participated in model fine-tuning and experimentation.
+      Introduced and contributed to the development of the hybrid model architecture and robustness evaluation metrics.
+5. Koh Fong Jun Damien
+      Contributed to video production and the preparation of the project presentation.
+      Ran experiments and was involved in the training, validation, and testing of the models.
+      Assisted with executing experiments and evaluating model performance across different configurations.

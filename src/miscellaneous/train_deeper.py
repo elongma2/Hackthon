@@ -15,10 +15,10 @@ import torch
 import torch.nn as nn
 from torch.utils.data import DataLoader
 
-from .evaluate import evaluate
-from .multisource_dataset import FAKE_LABEL, REAL_LABEL
-from .source_balanced import calculate_source_metrics
-from .train import train_one_epoch
+from ..evaluate import evaluate
+from ..multisource_dataset import FAKE_LABEL, REAL_LABEL
+from ..source_balanced import calculate_source_metrics
+from ..train import train_one_epoch
 
 
 EXPECTED_EFFICIENTNET_BLOCKS = 9

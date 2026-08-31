@@ -25,7 +25,7 @@ from .hybrid_v2_model import (
     _checkpoint_state_dict,
     _validated_feature_state,
 )
-from .transforms import IMAGENET_MEAN, IMAGENET_STD
+from ..transforms import IMAGENET_MEAN, IMAGENET_STD
 
 
 HYBRID_V3_MODEL_TYPE = "hybrid_v3"

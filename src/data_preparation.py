@@ -26,10 +26,12 @@ class PreparationResult:
 
 
 def _is_supported_image(path: Path) -> bool:
+    """Return whether a path is a supported regular image file."""
     return path.is_file() and path.suffix.lower() in SUPPORTED_IMAGE_EXTENSIONS
 
 
 def _stable_relative_key(path: Path, root: Path) -> tuple[str, str]:
+    """Build a case-tolerant deterministic sort key relative to a source root."""
     relative = path.relative_to(root).as_posix()
     return relative.casefold(), relative
 
@@ -57,6 +59,7 @@ def _split_directories(source_root: Path) -> list[Path]:
 def _candidate_split_pairs(
     split_directories: list[Path],
 ) -> list[tuple[Path, Path, Path]]:
+    """Pair unambiguous sibling TRAIN and TEST directories by their parent."""
     by_parent: dict[Path, dict[str, list[Path]]] = {}
     for directory in split_directories:
         by_name = by_parent.setdefault(directory.parent, {"TRAIN": [], "TEST": []})
@@ -70,6 +73,7 @@ def _candidate_split_pairs(
 
 
 def _path_is_within(path: Path, directory: Path) -> bool:
+    """Return whether path is nested beneath directory without filesystem access."""
     try:
         path.relative_to(directory)
     except ValueError:
@@ -105,12 +109,14 @@ def _validate_move_plan(moves: list[tuple[Path, Path]]) -> None:
 
 
 def _execute_move_plan(moves: list[tuple[Path, Path]]) -> None:
+    """Execute a previously validated list of source-to-destination moves."""
     for source, destination in moves:
         destination.parent.mkdir(parents=True, exist_ok=True)
         shutil.move(str(source), str(destination))
 
 
 def _result_warning(label: str, source: str, message: str) -> PreparationResult:
+    """Print a non-destructive preparation warning and return its result record."""
     print(f"[WARN] {source} [{label}]: {message}")
     return PreparationResult(label, source, "warning")
 
@@ -122,6 +128,7 @@ def _promote_nested_split(
     pair: tuple[Path, Path, Path],
     all_images: list[Path],
 ) -> PreparationResult:
+    """Safely move one valid nested split pair to canonical source-level folders."""
     parent, train_directory, test_directory = pair
     train_images = [path for path in all_images if _path_is_within(path, train_directory)]
     test_images = [path for path in all_images if _path_is_within(path, test_directory)]
@@ -187,6 +194,7 @@ def _prepare_source(
     train_ratio: float,
     seed: int,
 ) -> PreparationResult:
+    """Preserve a valid source split or create one deterministic TRAIN/TEST split."""
     source_name = source_root.name
     all_images = _discover_images(source_root)
     split_directories = _split_directories(source_root)
@@ -288,6 +296,7 @@ def _prepare_source(
 
 
 def _print_summary(results: list[PreparationResult]) -> None:
+    """Print per-source and aggregate preparation counts."""
     print("\n--- Dataset Preparation Summary ---")
     for label in ("FAKE", "REAL"):
         print(f"\n{label}:")
